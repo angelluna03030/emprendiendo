@@ -25,7 +25,7 @@ export function Menu(props: { save: SaveData; onPlay: () => void; onCoop: () => 
           <br />
           <span>GAME</span>
         </h1>
-        <p className="subtitle">Tech Factory · Simulador de tipos de producción</p>
+        <p className="subtitle">Tech Factory · Simulador de tipos de producción creado por angel, andres y luis. </p>
         <div className="menu-buttons">
           <button className="btn primary big" onClick={props.onPlay} autoFocus>
             ▶ Jugar
