@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { Game } from './Game'
+import type { Game, Player } from './Game'
 import { disposeObject } from './Game'
 import { box, C, makeBoss, makeBot, makeGun, makeTurret, makeZombie, mat, type WorkerRig } from './models'
 import type { Station, Upgrade, WeaponSlot } from './types'
@@ -8,7 +8,7 @@ import type { Station, Upgrade, WeaponSlot } from './types'
 /* Configuración                                                        */
 /* ------------------------------------------------------------------ */
 
-type WeaponId = 'pistola' | 'subfusil' | 'escopeta'
+export type WeaponId = 'pistola' | 'subfusil' | 'escopeta'
 
 interface WeaponDef {
   name: string
@@ -43,14 +43,17 @@ const MEDKIT_COST = 40
 const FIRST_WAVE = 20
 const WAVE_EVERY = 26
 
+type ZKind = 'normal' | 'brute' | 'boss'
+const KIND_CODE: ZKind[] = ['normal', 'brute', 'boss']
+const SIZE: Record<ZKind, number> = { normal: 1, brute: 1.35, boss: 2.2 }
+
 interface Zombie {
+  id: number
+  kind: ZKind
   rig: WorkerRig
   hp: number
   maxHp: number
   speed: number
-  brute: boolean
-  boss: boolean
-  /** Escala del modelo (1 normal, 1.35 grande, 2.2 jefe). */
   size: number
   summonT: number
   mode: 'player' | 'machine' | 'thief' | 'flee'
@@ -63,12 +66,17 @@ interface Zombie {
   hitFlash: number
   barBg: THREE.Sprite
   bar: THREE.Sprite
+  /** Invitado: posición recibida del anfitrión. */
+  net: THREE.Vector3
+  netRot: number
 }
 
 interface Bullet {
   mesh: THREE.Mesh
   vel: THREE.Vector3
   life: number
+  /** Solo visual (invitados): no hace daño. */
+  visual: boolean
 }
 
 interface Shooter {
@@ -77,76 +85,96 @@ interface Shooter {
   cooldown: number
   range: number
   rate: number
+  owner: string
+  net: THREE.Vector3
+}
+
+interface CombatSnap {
+  z: number[][]
+  tu: number[][]
+  gd: number[] | null
+  rb: number[] | null
+  ow: WeaponId[]
+  am: Record<WeaponId, number>
+  k: number
+  w: number
+  nw: number
 }
 
 const bulletGeo = new THREE.SphereGeometry(0.09, 6, 4)
 
 /**
- * Zombis, armas del jugador, vida y robots de ayuda que se compran en la tienda.
+ * Zombis, armas, vida de los jugadores y robots de ayuda de la tienda.
+ * El anfitrión (o el modo solo) simula todo; los invitados solo dibujan.
  */
 export class Combat {
   readonly enabled: boolean
-  hp = MAX_HP
-  knocked = 0
-  hurtAt = -10
   kills = 0
   wave = 0
-  firing = false
-  readonly aim = new THREE.Vector3(0, 0, -5)
 
   private g: Game
   private zombies: Zombie[] = []
   private bullets: Bullet[] = []
-  private weapon: WeaponId = 'pistola'
+  private zombieSeq = 0
+  /** Armas y munición son del equipo. */
   private owned = new Set<WeaponId>(['pistola'])
   private ammo: Record<WeaponId, number> = { pistola: Infinity, subfusil: 0, escopeta: 0 }
-  private cooldown = 0
   private nextWave = FIRST_WAVE
-  private lastHurt = -10
-  private gun: THREE.Group
   private turrets: Shooter[] = []
   private guard: Shooter | null = null
-  private repairBot: { group: THREE.Group; job: { pos: THREE.Vector3; done: () => void } | null; work: number } | null = null
+  private repairBot: { group: THREE.Group; job: { pos: THREE.Vector3; done: () => void } | null; work: number; net: THREE.Vector3 } | null = null
   private readonly repairHome = new THREE.Vector3(-10.5, 0, 6.5)
   private groanT = 3
 
   constructor(g: Game, enabled: boolean) {
     this.g = g
     this.enabled = enabled
-    this.gun = makeGun('pistola')
-    this.gun.position.set(0, -0.42, 0.08)
-    this.gun.visible = enabled
-    g.rig.armR.add(this.gun)
+  }
+
+  /** Más jugadores = más zombis. */
+  private get teamFactor() {
+    return 1 + 0.6 * (this.g.teamSize - 1)
   }
 
   /* ---------------------------------------------------------------- */
   /* Armas                                                             */
   /* ---------------------------------------------------------------- */
 
-  select(id: string) {
-    const w = id as WeaponId
-    if (!this.enabled || !this.owned.has(w) || this.weapon === w) return
-    if (this.ammo[w] <= 0) {
-      this.g.toast(`Sin munición para ${WEAPONS[w].name}: cómprala en la tienda (B)`, 'warn')
-      this.g.sfx('error')
-      return
+  /** Pone el modelo del arma en la mano del jugador. */
+  equip(p: Player, w: WeaponId) {
+    p.weapon = w
+    if (p.gun && p.gunKind === w) return
+    if (p.gun) {
+      p.rig.armR.remove(p.gun)
+      disposeObject(p.gun, false)
     }
-    this.weapon = w
-    this.g.rig.armR.remove(this.gun)
-    disposeObject(this.gun, false)
-    this.gun = makeGun(w)
-    this.gun.position.set(0, -0.42, 0.08)
-    this.g.rig.armR.add(this.gun)
-    this.g.sfx('click')
+    p.gun = makeGun(w)
+    p.gunKind = w
+    p.gun.position.set(0, -0.42, 0.08)
+    p.gun.visible = this.enabled
+    p.rig.armR.add(p.gun)
   }
 
-  selectByKey(key: string) {
+  select(p: Player, w: WeaponId, notify: boolean) {
+    if (!this.enabled || !this.owned.has(w) || p.weapon === w) return
+    if (this.ammo[w] <= 0) {
+      if (notify) {
+        this.g.toast(`Sin munición para ${WEAPONS[w].name}: cómprala en la tienda (B)`, 'warn')
+        this.g.sfx('error')
+      }
+      return
+    }
+    this.equip(p, w)
+    if (notify) this.g.sfx('click')
+  }
+
+  selectByKey(p: Player, key: string) {
     const id = WEAPON_IDS.find((w) => WEAPONS[w].key === key)
-    if (id) this.select(id)
+    if (id) this.select(p, id, true)
     return !!id
   }
 
-  weapons(): WeaponSlot[] {
+  weapons(p: Player): WeaponSlot[] {
     if (!this.enabled) return []
     return WEAPON_IDS.map((id) => ({
       id,
@@ -154,54 +182,60 @@ export class Combat {
       key: WEAPONS[id].key,
       ammo: this.ammo[id] === Infinity ? null : this.ammo[id],
       owned: this.owned.has(id),
-      active: this.weapon === id,
+      active: p.weapon === id,
     }))
   }
 
   /** Dirección de disparo en el plano del piso. */
-  aimDir() {
-    const d = this.aim.clone().sub(this.g.playerPos).setY(0)
-    return d.lengthSq() > 0.01 ? d.normalize() : new THREE.Vector3(0, 0, -1)
+  aimDir(p: Player) {
+    const d = p.aim.clone().sub(p.pos).setY(0)
+    return d.lengthSq() > 0.01 ? d.normalize() : new THREE.Vector3(Math.sin(p.facing), 0, Math.cos(p.facing))
   }
 
-  private shoot() {
-    const def = WEAPONS[this.weapon]
-    if (this.ammo[this.weapon] <= 0) {
-      this.g.toast(`${def.name} sin munición — cambiando a pistola`, 'warn')
-      this.select('pistola')
+  private shoot(p: Player) {
+    const def = WEAPONS[p.weapon]
+    if (this.ammo[p.weapon] <= 0) {
+      this.g.withActor(p, () => this.g.toast(`${def.name} sin munición — cambiando a pistola`, 'warn'))
+      this.equip(p, 'pistola')
       return
     }
-    this.ammo[this.weapon]--
-    this.cooldown = def.rate
-    const dir = this.aimDir()
-    const origin = this.g.playerPos.clone().add(new THREE.Vector3(0, 1.0, 0)).addScaledVector(dir, 0.7)
+    this.ammo[p.weapon]--
+    p.cooldown = def.rate
+    const dir = this.aimDir(p)
+    const origin = p.pos.clone().add(new THREE.Vector3(0, 1.0, 0)).addScaledVector(dir, 0.7)
     for (let i = 0; i < def.pellets; i++) {
       const a = (Math.random() - 0.5) * def.spread
       const v = dir.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), a).multiplyScalar(def.speed)
-      this.spawnBullet(origin, v)
+      this.spawnBullet(origin, v, false)
     }
-    this.g.sfx(this.weapon === 'escopeta' ? 'shotgun' : 'shot')
+    this.g.sfx(p.weapon === 'escopeta' ? 'shotgun' : 'shot')
   }
 
-  private spawnBullet(origin: THREE.Vector3, vel: THREE.Vector3) {
+  private spawnBullet(origin: THREE.Vector3, vel: THREE.Vector3, visual: boolean) {
     const mesh = new THREE.Mesh(bulletGeo, mat(0xfde047, 0xfacc15))
     mesh.position.copy(origin)
     this.g.scene.add(mesh)
-    this.bullets.push({ mesh, vel, life: 0.9 })
+    this.bullets.push({ mesh, vel, life: 0.9, visual })
+    if (!visual) this.g.netBullet(origin, vel)
+  }
+
+  /** Invitado: bala que solo se ve. */
+  visualBullet(origin: THREE.Vector3, vel: THREE.Vector3) {
+    this.spawnBullet(origin, vel, true)
   }
 
   /* ---------------------------------------------------------------- */
   /* Tienda (armas, defensa y robots)                                  */
   /* ---------------------------------------------------------------- */
 
-  shopItems(): Upgrade[] {
+  shopItems(p: Player): Upgrade[] {
     const items: Upgrade[] = []
     if (this.enabled) {
       for (const id of ['subfusil', 'escopeta'] as WeaponId[]) {
         const w = WEAPONS[id]
         items.push(
           this.owned.has(id)
-            ? { id: `ammo:${id}`, label: `🔸 Munición ${w.name} +${w.ammoPack}`, desc: `Tienes ${this.ammo[id]} balas`, cost: w.ammoPrice, owned: false, category: 'arma', repeatable: true }
+            ? { id: `ammo:${id}`, label: `🔸 Munición ${w.name} +${w.ammoPack}`, desc: `El equipo tiene ${this.ammo[id]} balas`, cost: w.ammoPrice, owned: false, category: 'arma', repeatable: true }
             : {
                 id: `weapon:${id}`,
                 label: id === 'subfusil' ? '🔫 Subfusil' : '💥 Escopeta',
@@ -214,24 +248,24 @@ export class Combat {
       }
       items.push(
         { id: 'turret', label: `🗼 Torreta robot (${this.turrets.length}/${MAX_TURRETS})`, desc: 'Se instala donde estás y dispara sola a los zombis', cost: TURRET_COST, owned: this.turrets.length >= MAX_TURRETS, category: 'defensa', repeatable: true },
-        { id: 'guard', label: '🛡️ Robot guardián', desc: 'Te sigue y te protege disparando', cost: GUARD_COST, owned: !!this.guard, category: 'defensa' },
-        { id: 'medkit', label: '❤️ Botiquín', desc: 'Recupera 50 de vida', cost: MEDKIT_COST, owned: false, category: 'defensa', repeatable: true },
+        { id: 'guard', label: '🛡️ Robot guardián', desc: 'Sigue a quien lo compra y dispara', cost: GUARD_COST, owned: !!this.guard, category: 'defensa' },
+        { id: 'medkit', label: '❤️ Botiquín', desc: `Recupera 50 de vida (tienes ${Math.round(p.hp)})`, cost: MEDKIT_COST, owned: false, category: 'defensa', repeatable: true },
       )
     }
     items.push({ id: 'repairbot', label: '🔧 Robot reparador', desc: 'Repara solo las máquinas dañadas o averiadas', cost: REPAIR_BOT_COST, owned: !!this.repairBot, category: 'fabrica' })
     return items
   }
 
-  /** Devuelve true si el id pertenece a esta tienda. */
-  buy(id: string): boolean {
+  /** Compra hecha por el jugador p. Devuelve true si el id es de esta tienda. */
+  buy(p: Player, id: string): boolean {
     const g = this.g
     if (id.startsWith('weapon:')) {
       const w = id.slice(7) as WeaponId
       if (this.owned.has(w) || !g.spend(WEAPONS[w].price)) return true
       this.owned.add(w)
       this.ammo[w] += WEAPONS[w].ammoPack
-      this.select(w)
-      g.toast(`${WEAPONS[w].name} comprado — tecla ${WEAPONS[w].key} para usarlo`, 'good')
+      this.equip(p, w)
+      g.toast(`${WEAPONS[w].name} comprado para el equipo — tecla ${WEAPONS[w].key}`, 'good', true)
       return true
     }
     if (id.startsWith('ammo:')) {
@@ -242,89 +276,115 @@ export class Combat {
     switch (id) {
       case 'turret': {
         if (this.turrets.length >= MAX_TURRETS || !g.spend(TURRET_COST)) return true
-        const t = makeTurret()
-        const p = g.playerPos.clone().addScaledVector(this.aimDir(), 1.2)
-        t.group.position.set(p.x, 0, p.z)
-        g.scene.add(t.group)
-        this.turrets.push({ group: t.group, head: t.head, cooldown: 0, range: 8, rate: 0.4 })
-        g.toast('🗼 Torreta instalada', 'good')
+        const pos = p.pos.clone().addScaledVector(this.aimDir(p), 1.2)
+        this.addTurret(pos.x, pos.z, p.id)
+        g.toast('🗼 Torreta instalada', 'good', true)
         return true
       }
       case 'guard': {
         if (this.guard || !g.spend(GUARD_COST)) return true
-        const b = makeBot(C.blue)
-        b.group.position.copy(g.playerPos).add(new THREE.Vector3(-1.2, 0, 1))
-        g.scene.add(b.group)
-        this.guard = { group: b.group, head: b.head, cooldown: 0, range: 7, rate: 0.45 }
-        g.toast('🛡️ Robot guardián activado', 'good')
+        this.addGuard(p.pos.x - 1.2, p.pos.z + 1, p.id)
+        g.toast(`🛡️ Robot guardián activado para ${p.name}`, 'good', true)
         return true
       }
       case 'medkit':
-        if (this.hp >= MAX_HP) g.toast('Tu vida ya está completa', 'info')
-        else if (g.spend(MEDKIT_COST)) this.hp = Math.min(MAX_HP, this.hp + 50)
+        if (p.hp >= MAX_HP) g.toast('Tu vida ya está completa', 'info')
+        else if (g.spend(MEDKIT_COST)) p.hp = Math.min(MAX_HP, p.hp + 50)
         return true
       case 'repairbot': {
         if (this.repairBot || !g.spend(REPAIR_BOT_COST)) return true
-        const b = makeBot(C.orange)
-        b.group.position.copy(this.repairHome)
-        g.scene.add(b.group)
-        this.repairBot = { group: b.group, job: null, work: 0 }
-        g.toast('🔧 Robot reparador activado: arreglará las máquinas por ti', 'good')
+        this.addRepairBot()
+        g.toast('🔧 Robot reparador activado: arreglará las máquinas', 'good', true)
         return true
       }
     }
     return false
   }
 
-  /* ---------------------------------------------------------------- */
-  /* Vida del jugador                                                  */
-  /* ---------------------------------------------------------------- */
+  private addTurret(x: number, z: number, owner: string) {
+    const t = makeTurret()
+    t.group.position.set(x, 0, z)
+    this.g.scene.add(t.group)
+    this.turrets.push({ group: t.group, head: t.head, cooldown: 0, range: 8, rate: 0.4, owner, net: t.group.position.clone() })
+  }
 
-  private hurt(amount: number) {
-    if (this.knocked > 0) return
-    this.hp -= amount
-    this.lastHurt = this.g.elapsed
-    this.hurtAt = this.g.elapsed
-    this.g.sfx('hurt')
-    if (this.hp <= 0) {
-      this.hp = 0
-      this.knocked = KNOCK_TIME
-      this.firing = false
-      if (this.g.held) this.g.consumeHeld()
-      this.g.loseMoney(KNOCK_COST)
-      this.g.toast(`🧟 ¡Te derribaron! Pierdes lo que llevabas y $${KNOCK_COST}`, 'bad')
-    }
+  private addGuard(x: number, z: number, owner: string) {
+    const b = makeBot(C.blue)
+    b.group.position.set(x, 0, z)
+    this.g.scene.add(b.group)
+    this.guard = { group: b.group, head: b.head, cooldown: 0, range: 7, rate: 0.45, owner, net: b.group.position.clone() }
+  }
+
+  private addRepairBot() {
+    const b = makeBot(C.orange)
+    b.group.position.copy(this.repairHome)
+    this.g.scene.add(b.group)
+    this.repairBot = { group: b.group, job: null, work: 0, net: this.repairHome.clone() }
   }
 
   /* ---------------------------------------------------------------- */
-  /* Bucle                                                             */
+  /* Vida de los jugadores                                             */
+  /* ---------------------------------------------------------------- */
+
+  private hurt(p: Player, amount: number) {
+    if (p.knocked > 0) return
+    p.hp -= amount
+    p.lastHurt = this.g.elapsed
+    p.hurtAt = this.g.elapsed
+    this.g.sfx('hurt')
+    if (p.hp <= 0) {
+      p.hp = 0
+      p.knocked = KNOCK_TIME
+      p.firing = false
+      this.g.withActor(p, () => {
+        if (this.g.held) this.g.consumeHeld()
+        this.g.loseMoney(KNOCK_COST)
+        this.g.toast(`🧟 ¡${this.g.multiplayer ? p.name + ' fue derribado' : 'Te derribaron'}! Se pierde lo que llevaba y $${KNOCK_COST}`, 'bad', true)
+      })
+    }
+  }
+
+  private alivePlayers() {
+    return this.g.players.filter((p) => p.knocked <= 0)
+  }
+
+  private nearestPlayer(from: THREE.Vector3): Player | null {
+    let best: Player | null = null
+    let bestD = Infinity
+    for (const p of this.alivePlayers()) {
+      const d = p.pos.distanceTo(from)
+      if (d < bestD) {
+        bestD = d
+        best = p
+      }
+    }
+    return best
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Bucle del anfitrión                                               */
   /* ---------------------------------------------------------------- */
 
   update(dt: number, running: boolean) {
     const g = this.g
-    if (this.knocked > 0) {
-      this.knocked -= dt
-      g.rig.root.rotation.x = -Math.PI / 2
-      g.rig.root.position.y = 0.3
-      if (this.knocked <= 0) {
-        g.rig.root.rotation.x = 0
-        g.rig.root.position.y = 0
-        g.playerPos.set(0, 0, 3.5)
-        this.hp = MAX_HP
-        g.toast('Te levantaste. ¡A seguir produciendo!', 'info')
+    for (const p of g.players) {
+      if (p.knocked > 0) {
+        p.knocked -= dt
+        if (p.knocked <= 0) {
+          p.knocked = 0
+          p.hp = MAX_HP
+          g.respawn(p)
+          g.withActor(p, () => g.toast('Te levantaste. ¡A seguir produciendo!', 'info'))
+        }
+      } else if (g.elapsed - p.lastHurt > 5 && p.hp < MAX_HP) {
+        p.hp = Math.min(MAX_HP, p.hp + 4 * dt)
       }
-    } else if (g.elapsed - this.lastHurt > 5 && this.hp < MAX_HP) {
-      this.hp = Math.min(MAX_HP, this.hp + 4 * dt)
+      // Disparo: clic = un tiro, mantener = ráfaga
+      p.cooldown -= dt
+      if (this.enabled && running && p.firing && p.knocked <= 0 && p.cooldown <= 0) this.shoot(p)
     }
 
-    // Disparo: clic = un tiro, mantener = ráfaga
-    this.cooldown -= dt
-    if (this.enabled && running && this.firing && this.knocked <= 0 && this.cooldown <= 0) this.shoot()
-    g.rig.armR.rotation.x = this.enabled && this.firing && this.knocked <= 0 ? -1.5 : g.rig.armR.rotation.x
-
-    if (this.enabled && running) {
-      if (g.elapsed >= this.nextWave) this.spawnWave()
-    }
+    if (this.enabled && running && g.elapsed >= this.nextWave) this.spawnWave()
     this.updateZombies(dt, running)
     this.updateBullets(dt)
     this.updateShooters(dt)
@@ -339,7 +399,7 @@ export class Combat {
     return this.zombies.filter((z) => z.dying < 0).length
   }
 
-  /** Al terminar el nivel los zombis huyen. */
+  /** Al terminar el nivel los zombis caen. */
   clear() {
     for (const z of this.zombies) if (z.dying < 0) z.dying = 0.8
     this.nextWave = Infinity
@@ -348,11 +408,11 @@ export class Combat {
   private spawnWave() {
     this.wave++
     this.nextWave = this.g.elapsed + WAVE_EVERY
-    const scale = this.g.level.zombieScale
-    const count = Math.min(9 * scale, (1 + this.wave) * scale)
-    const brutes = this.wave >= 3 ? scale : 0
+    const scale = this.g.level.zombieScale * this.teamFactor
+    const count = Math.round(Math.min(9, 1 + this.wave) * scale)
+    const brutes = this.wave >= 3 ? Math.round(scale) : 0
     for (let i = 0; i < count; i++) this.spawnZombie(i < brutes ? 'brute' : 'normal')
-    this.g.toast(`🧟 ¡Oleada ${this.wave}! Llegan ${count} zombis — apunta con el mouse y dispara`, 'bad')
+    this.g.toast(`🧟 ¡Oleada ${this.wave}! Llegan ${count} zombis — apunta con el mouse y dispara`, 'bad', true)
     this.g.sfx('groan')
   }
 
@@ -360,72 +420,47 @@ export class Combat {
   spawnBosses(n: number) {
     if (!this.enabled) return
     for (let i = 0; i < n; i++) this.spawnZombie('boss')
-    this.g.toast(`👑 ¡Llegaron ${n} JEFES FINALES! Derrótalos para terminar el nivel`, 'bad')
+    this.g.toast(`👑 ¡Llegaron ${n} JEFES FINALES! Derrótalos para terminar el nivel`, 'bad', true)
     this.g.sfx('alarm')
     this.g.sfx('groan')
   }
 
   get bossesAlive() {
-    return this.zombies.filter((z) => z.boss && z.dying < 0).length
+    return this.zombies.filter((z) => z.kind === 'boss' && z.dying < 0).length
   }
 
   bosses() {
-    return this.zombies.filter((z) => z.boss && z.dying < 0).map((z) => ({ hp: Math.max(0, Math.ceil(z.hp)), max: z.maxHp }))
+    return this.zombies.filter((z) => z.kind === 'boss' && z.dying < 0).map((z) => ({ hp: Math.max(0, Math.ceil(z.hp)), max: z.maxHp }))
   }
 
   firstBoss(): THREE.Object3D | null {
-    return this.zombies.find((z) => z.boss && z.dying < 0)?.rig.root ?? null
+    return this.zombies.find((z) => z.kind === 'boss' && z.dying < 0)?.rig.root ?? null
   }
 
-  private spawnZombie(kind: 'normal' | 'brute' | 'boss') {
-    const brute = kind === 'brute'
-    const boss = kind === 'boss'
+  /** Crea el modelo y la barra de vida de un zombi. */
+  private createZombie(id: number, kind: ZKind, pos: THREE.Vector3, maxHp: number): Zombie {
     const g = this.g
-    const side = Math.floor(Math.random() * 3)
-    const pos =
-      side === 0
-        ? new THREE.Vector3(-14.5, 0, -5 + Math.random() * 12)
-        : side === 1
-          ? new THREE.Vector3(14.5, 0, -5 + Math.random() * 12)
-          : new THREE.Vector3(-10 + Math.random() * 20, 0, 10.5)
-    const rig = boss ? makeBoss() : makeZombie(brute)
+    const rig = kind === 'boss' ? makeBoss() : makeZombie(kind === 'brute')
     rig.root.position.copy(pos)
     g.scene.add(rig.root)
-
+    const wide = kind === 'boss' ? 2 : 1
     const barBg = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0x1e293b, depthTest: false }))
     const bar = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0xef4444, depthTest: false }))
-    const size = boss ? 2.2 : brute ? 1.35 : 1
-    barBg.scale.set(0.9 * (boss ? 2 : 1), 0.12, 1)
-    bar.scale.set(0.84 * (boss ? 2 : 1), 0.08, 1)
+    barBg.scale.set(0.9 * wide, 0.12, 1)
+    bar.scale.set(0.84 * wide, 0.08, 1)
     barBg.renderOrder = bar.renderOrder = 12
     g.scene.add(barBg, bar)
-
-    const machines = g.allStations.filter((s) => (s.machine || s.onDamage) && !g.isDamaged(s))
-    const loot = g.allStations.filter((s) => s.steal)
-    const r = Math.random()
-    let mode: Zombie['mode'] = 'player'
-    let target: Station | null = null
-    if (boss) {
-      // El jefe siempre va por el jugador
-    } else if (r < 0.3 && machines.length) {
-      mode = 'machine'
-      target = machines[Math.floor(Math.random() * machines.length)]
-    } else if (r < 0.55 && loot.length) {
-      mode = 'thief'
-      target = loot[Math.floor(Math.random() * loot.length)]
-    }
-    const maxHp = boss ? 90 : brute ? 12 : 4
-    this.zombies.push({
+    const z: Zombie = {
+      id,
+      kind,
       rig,
       hp: maxHp,
       maxHp,
-      speed: boss ? 1.25 : brute ? 1.1 : 1.5 + Math.random() * 0.5,
-      brute,
-      boss,
-      size,
+      speed: kind === 'boss' ? 1.25 : kind === 'brute' ? 1.1 : 1.5 + Math.random() * 0.5,
+      size: SIZE[kind],
       summonT: 8,
-      mode,
-      target,
+      mode: 'player',
+      target: null,
       attackT: 0,
       loot: null,
       lootMesh: null,
@@ -434,7 +469,55 @@ export class Combat {
       hitFlash: 0,
       barBg,
       bar,
-    })
+      net: pos.clone(),
+      netRot: 0,
+    }
+    this.zombies.push(z)
+    return z
+  }
+
+  private spawnZombie(kind: ZKind) {
+    const g = this.g
+    const side = Math.floor(Math.random() * 3)
+    const pos =
+      side === 0
+        ? new THREE.Vector3(-14.5, 0, -5 + Math.random() * 12)
+        : side === 1
+          ? new THREE.Vector3(14.5, 0, -5 + Math.random() * 12)
+          : new THREE.Vector3(-10 + Math.random() * 20, 0, 10.5)
+    const maxHp = kind === 'boss' ? Math.round(90 * (1 + 0.5 * (g.teamSize - 1))) : kind === 'brute' ? 12 : 4
+    const z = this.createZombie(++this.zombieSeq, kind, pos, maxHp)
+
+    if (kind === 'boss') return
+    const machines = g.allStations.filter((s) => (s.machine || s.onDamage) && !g.isDamaged(s))
+    const loot = g.allStations.filter((s) => s.steal)
+    const r = Math.random()
+    if (r < 0.3 && machines.length) {
+      z.mode = 'machine'
+      z.target = machines[Math.floor(Math.random() * machines.length)]
+    } else if (r < 0.55 && loot.length) {
+      z.mode = 'thief'
+      z.target = loot[Math.floor(Math.random() * loot.length)]
+    }
+  }
+
+  private updateBars(z: Zombie) {
+    const root = z.rig.root
+    const barW = 0.84 * (z.kind === 'boss' ? 2 : 1)
+    z.barBg.position.set(root.position.x, 0.4 + 1.45 * z.size, root.position.z)
+    z.bar.position.copy(z.barBg.position)
+    const ratio = Math.max(0, z.hp / z.maxHp)
+    z.bar.scale.x = barW * ratio
+    z.bar.position.x -= (barW * (1 - ratio)) / 2
+    z.barBg.visible = z.bar.visible = (z.kind === 'boss' || z.hp < z.maxHp) && z.dying < 0
+  }
+
+  private animateDeath(z: Zombie, i: number, dt: number) {
+    z.dying -= dt
+    const root = z.rig.root
+    root.rotation.x = Math.max(-Math.PI / 2, root.rotation.x - dt * 5)
+    root.position.y -= dt * 0.3
+    if (z.dying <= 0) this.removeZombie(i)
   }
 
   private updateZombies(dt: number, running: boolean) {
@@ -447,62 +530,51 @@ export class Combat {
     for (let i = this.zombies.length - 1; i >= 0; i--) {
       const z = this.zombies[i]
       const root = z.rig.root
-      const barW = 0.84 * (z.boss ? 2 : 1)
-      z.barBg.position.set(root.position.x, 0.4 + 1.45 * z.size, root.position.z)
-      z.bar.position.copy(z.barBg.position)
-      const ratio = Math.max(0, z.hp / z.maxHp)
-      z.bar.scale.x = barW * ratio
-      z.bar.position.x -= (barW * (1 - ratio)) / 2
-      z.barBg.visible = z.bar.visible = (z.boss || z.hp < z.maxHp) && z.dying < 0
-
+      this.updateBars(z)
       if (z.dying >= 0) {
-        z.dying -= dt
-        root.rotation.x = Math.max(-Math.PI / 2, root.rotation.x - dt * 5)
-        root.position.y -= dt * 0.3
-        if (z.dying <= 0) this.removeZombie(i)
+        this.animateDeath(z, i, dt)
         continue
       }
       if (!running) continue
 
       if (z.hitFlash > 0) {
         z.hitFlash -= dt
-        root.scale.setScalar(z.size * (1 + z.hitFlash))
+        root.scale.setScalar(z.size * (1 + Math.max(0, z.hitFlash)))
       }
 
       // El jefe invoca zombis ayudantes cada cierto tiempo
-      if (z.boss) {
+      if (z.kind === 'boss') {
         z.summonT -= dt
         if (z.summonT <= 0) {
           z.summonT = 10
           for (let k = 0; k < 2; k++) this.spawnZombie('normal')
-          g.toast('👑 El jefe llamó a más zombis', 'warn')
+          g.toast('👑 El jefe llamó a más zombis', 'warn', true)
           g.sfx('groan')
         }
       }
 
       // Destino según su intención
+      const prey = this.nearestPlayer(root.position)
       let goal: THREE.Vector3
       if (z.mode === 'flee') goal = z.flee
-      else if (z.mode === 'player' || !z.target) goal = g.playerPos
+      else if (z.mode === 'player' || !z.target) goal = prey?.pos ?? new THREE.Vector3(0, 0, 1)
       else goal = z.target.object.position
 
       const to = goal.clone().sub(root.position).setY(0)
       const dist = to.length()
-      const reach = z.mode === 'player' ? (z.boss ? 1.6 : 0.9) : z.mode === 'flee' ? 0.3 : this.edgeDist(z.target!, root.position)
-      const close = z.mode === 'player' ? dist < reach : z.mode === 'flee' ? dist < 0.5 : reach < 0.65
+      const reach = z.mode === 'player' ? (z.kind === 'boss' ? 1.6 : 0.9) : z.mode === 'flee' ? 0.3 : this.edgeDist(z.target!, root.position)
+      const close = z.mode === 'player' ? !!prey && dist < reach : z.mode === 'flee' ? dist < 0.5 : reach < 0.65
 
       if (!close) {
         to.normalize()
         root.position.addScaledVector(to, z.speed * dt)
         root.rotation.y = Math.atan2(to.x, to.z)
-        const s = Math.sin(g.elapsed * 7 + i) * 0.5
-        z.rig.legL.rotation.x = s
-        z.rig.legR.rotation.x = -s
+        this.walk(z, i)
         z.attackT = 0
       } else {
         z.attackT += dt
         z.rig.armL.rotation.x = -1.45 + Math.sin(g.elapsed * 12) * 0.3
-        this.act(z)
+        this.act(z, prey)
       }
       if (z.mode !== 'flee') this.collide(root.position)
       if (z.lootMesh) z.lootMesh.position.set(root.position.x, 0.6 + 1.45 * z.size, root.position.z)
@@ -532,12 +604,18 @@ export class Combat {
     }
   }
 
-  private act(z: Zombie) {
+  private walk(z: Zombie, i: number) {
+    const s = Math.sin(this.g.elapsed * 7 + i) * 0.5
+    z.rig.legL.rotation.x = s
+    z.rig.legR.rotation.x = -s
+  }
+
+  private act(z: Zombie, prey: Player | null) {
     const g = this.g
     if (z.mode === 'player') {
-      if (z.attackT >= (z.boss ? 1.2 : 0.9)) {
+      if (prey && z.attackT >= (z.kind === 'boss' ? 1.2 : 0.9)) {
         z.attackT = 0
-        this.hurt(z.boss ? 25 : z.brute ? 20 : 10)
+        this.hurt(prey, z.kind === 'boss' ? 25 : z.kind === 'brute' ? 20 : 10)
       }
     } else if (z.mode === 'machine' && z.target) {
       if (g.isDamaged(z.target)) {
@@ -554,14 +632,19 @@ export class Combat {
         return
       }
       z.loot = loot
-      z.lootMesh = box(0.45, 0.35, 0.45, C.cardboard)
-      g.scene.add(z.lootMesh)
-      g.toast(`🧟 ¡Un zombi se lleva ${loot}! Dispárale antes de que escape`, 'warn')
+      this.addLoot(z)
+      g.toast(`🧟 ¡Un zombi se lleva ${loot}! Dispárale antes de que escape`, 'warn', true)
       const p = z.rig.root.position
       z.flee = new THREE.Vector3(p.x < 0 ? -15 : 15, 0, p.z)
       z.mode = 'flee'
       z.speed *= 1.2
     }
+  }
+
+  private addLoot(z: Zombie) {
+    if (z.lootMesh) return
+    z.lootMesh = box(0.45, 0.35, 0.45, C.cardboard)
+    this.g.scene.add(z.lootMesh)
   }
 
   private edgeDist(st: Station, p: THREE.Vector3) {
@@ -592,15 +675,16 @@ export class Combat {
     const g = this.g
     z.hp -= amount
     z.hitFlash = 0.15
-    z.rig.root.position.addScaledVector(dir.clone().setY(0).normalize(), z.boss ? 0 : z.brute ? 0.05 : 0.15)
+    z.rig.root.position.addScaledVector(dir.clone().setY(0).normalize(), z.kind === 'boss' ? 0 : z.kind === 'brute' ? 0.05 : 0.15)
     g.sfx('hit')
     if (z.hp <= 0) {
       z.dying = 0.8
       this.kills++
       g.sfx('kill')
-      g.earn(z.boss ? 150 : z.brute ? BOUNTY * 3 : BOUNTY, z.rig.root.position.clone().setY(2), z.boss ? false : true)
-      if (z.boss) g.reward(25, '👑 ¡Jefe zombi derrotado!', 'correct', { at: z.rig.root.position.clone().setY(3.5) })
-      if (z.loot) g.toast(`✅ Recuperaste ${z.loot}`, 'good')
+      const boss = z.kind === 'boss'
+      g.earn(boss ? 150 : z.kind === 'brute' ? BOUNTY * 3 : BOUNTY, z.rig.root.position.clone().setY(2), !boss)
+      if (boss) g.reward(25, '👑 ¡Jefe zombi derrotado!', 'correct', { at: z.rig.root.position.clone().setY(3.5) })
+      if (z.loot) g.toast(`✅ Recuperaste ${z.loot}`, 'good', true)
     }
   }
 
@@ -627,9 +711,9 @@ export class Combat {
       for (const z of this.zombies) {
         if (z.dying >= 0) continue
         const p = z.rig.root.position
-        const r = z.boss ? 1.1 : z.brute ? 0.75 : 0.5
+        const r = z.kind === 'boss' ? 1.1 : z.kind === 'brute' ? 0.75 : 0.5
         if (Math.hypot(p.x - b.mesh.position.x, p.z - b.mesh.position.z) < r) {
-          this.damageZombie(z, 1, b.vel)
+          if (!b.visual) this.damageZombie(z, 1, b.vel)
           hit = true
           break
         }
@@ -658,7 +742,8 @@ export class Combat {
   private updateShooters(dt: number) {
     const g = this.g
     if (this.guard) {
-      const home = g.playerPos.clone().add(new THREE.Vector3(-1.3, 0, 1.1))
+      const owner = g.players.find((p) => p.id === this.guard!.owner) ?? g.players[0]
+      const home = owner.pos.clone().add(new THREE.Vector3(-1.3, 0, 1.1))
       const p = this.guard.group.position
       p.lerp(home, Math.min(1, dt * 2.5))
       p.y = 0
@@ -672,7 +757,7 @@ export class Combat {
       s.head.rotation.y = Math.atan2(dir.x, dir.z) - s.group.rotation.y
       if (s.cooldown <= 0) {
         s.cooldown = s.rate
-        this.spawnBullet(origin.clone().addScaledVector(dir, 0.6), dir.multiplyScalar(24))
+        this.spawnBullet(origin.clone().addScaledVector(dir, 0.6), dir.multiplyScalar(24), false)
         g.sfx('shot')
       }
     }
@@ -706,5 +791,94 @@ export class Combat {
         bot.job = null
       }
     }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Sincronización (anfitrión → invitados)                            */
+  /* ---------------------------------------------------------------- */
+
+  snapshot(): CombatSnap {
+    const r = (v: number) => Math.round(v * 100) / 100
+    return {
+      z: this.zombies.map((z) => [z.id, KIND_CODE.indexOf(z.kind), r(z.rig.root.position.x), r(z.rig.root.position.z), r(z.rig.root.rotation.y), Math.ceil(z.hp), z.maxHp, z.dying >= 0 ? 1 : 0, z.loot ? 1 : 0]),
+      tu: this.turrets.map((t) => [r(t.group.position.x), r(t.group.position.z), r(t.head.rotation.y)]),
+      gd: this.guard ? [r(this.guard.group.position.x), r(this.guard.group.position.z), r(this.guard.head.rotation.y)] : null,
+      rb: this.repairBot ? [r(this.repairBot.group.position.x), r(this.repairBot.group.position.z), r(this.repairBot.group.rotation.y)] : null,
+      ow: [...this.owned],
+      am: { ...this.ammo, pistola: -1 },
+      k: this.kills,
+      w: this.wave,
+      nw: this.nextWave === Infinity ? -1 : this.nextWaveIn(),
+    }
+  }
+
+  restore(raw: unknown) {
+    const s = raw as CombatSnap
+    const g = this.g
+    this.kills = s.k
+    this.wave = s.w
+    this.nextWave = s.nw < 0 ? Infinity : g.elapsed + s.nw
+    this.owned = new Set(s.ow)
+    this.ammo = { ...s.am, pistola: Infinity }
+
+    const seen = new Set<number>()
+    for (const [id, kind, x, z, ry, hp, max, dying, loot] of s.z) {
+      seen.add(id)
+      let zb = this.zombies.find((q) => q.id === id)
+      if (!zb) zb = this.createZombie(id, KIND_CODE[kind], new THREE.Vector3(x, 0, z), max)
+      if (hp < zb.hp) zb.hitFlash = 0.15
+      zb.hp = hp
+      zb.net.set(x, 0, z)
+      zb.netRot = ry
+      if (dying && zb.dying < 0) zb.dying = 0.8
+      if (loot) this.addLoot(zb)
+    }
+    for (let i = this.zombies.length - 1; i >= 0; i--) {
+      const z = this.zombies[i]
+      if (!seen.has(z.id) && z.dying < 0) this.removeZombie(i)
+    }
+
+    s.tu.forEach(([x, z, hr], i) => {
+      if (!this.turrets[i]) this.addTurret(x, z, '')
+      this.turrets[i].head.rotation.y = hr
+    })
+    if (s.gd) {
+      if (!this.guard) this.addGuard(s.gd[0], s.gd[1], '')
+      this.guard!.net.set(s.gd[0], 0, s.gd[1])
+      this.guard!.head.rotation.y = s.gd[2]
+    }
+    if (s.rb) {
+      if (!this.repairBot) this.addRepairBot()
+      this.repairBot!.net.set(s.rb[0], 0, s.rb[1])
+      this.repairBot!.group.rotation.y = s.rb[2]
+    }
+  }
+
+  /** Invitado: suaviza y anima lo que envió el anfitrión. */
+  updateView(dt: number) {
+    const k = Math.min(1, dt * 10)
+    for (let i = this.zombies.length - 1; i >= 0; i--) {
+      const z = this.zombies[i]
+      const root = z.rig.root
+      this.updateBars(z)
+      if (z.dying >= 0) {
+        this.animateDeath(z, i, dt)
+        continue
+      }
+      const moving = root.position.distanceToSquared(z.net) > 0.0004
+      root.position.lerp(z.net, k)
+      let diff = z.netRot - root.rotation.y
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff))
+      root.rotation.y += diff * k
+      if (moving) this.walk(z, i)
+      if (z.hitFlash > 0) {
+        z.hitFlash -= dt
+        root.scale.setScalar(z.size * (1 + Math.max(0, z.hitFlash)))
+      }
+      if (z.lootMesh) z.lootMesh.position.set(root.position.x, 0.6 + 1.45 * z.size, root.position.z)
+    }
+    this.updateBullets(dt)
+    if (this.guard) this.guard.group.position.lerp(this.guard.net, k)
+    if (this.repairBot) this.repairBot.group.position.lerp(this.repairBot.net, k)
   }
 }

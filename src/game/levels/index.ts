@@ -4,16 +4,16 @@ import { BatchLevel } from './level2-batch'
 import { ContinuousLevel } from './level3-continuous'
 import { OrderLevel } from './level4-order'
 
-export function createLevel(id: LevelId): Level {
+export function createLevel(id: LevelId, team = 1): Level {
   switch (id) {
     case 1:
-      return new ProjectLevel()
+      return new ProjectLevel(team)
     case 2:
-      return new BatchLevel()
+      return new BatchLevel(team)
     case 3:
-      return new ContinuousLevel()
+      return new ContinuousLevel(team)
     case 4:
-      return new OrderLevel()
+      return new OrderLevel(team)
   }
 }
 

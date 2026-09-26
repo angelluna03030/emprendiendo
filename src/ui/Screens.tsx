@@ -7,7 +7,7 @@ import type { LevelId, LevelResult } from '../game/types'
 /* Menú inicial                                                        */
 /* ------------------------------------------------------------------ */
 
-export function Menu(props: { save: SaveData; onPlay: () => void; onHelp: () => void; onRecords: () => void; onToggleSound: () => void; onToggleMusic: () => void; onToggleZombies: () => void }) {
+export function Menu(props: { save: SaveData; onPlay: () => void; onCoop: () => void; onHelp: () => void; onRecords: () => void; onToggleSound: () => void; onToggleMusic: () => void; onToggleZombies: () => void }) {
   const { save } = props
   return (
     <div className="screen menu">
@@ -29,6 +29,9 @@ export function Menu(props: { save: SaveData; onPlay: () => void; onHelp: () => 
         <div className="menu-buttons">
           <button className="btn primary big" onClick={props.onPlay} autoFocus>
             ▶ Jugar
+          </button>
+          <button className="btn big coop-btn" onClick={props.onCoop}>
+            👥 Jugar en equipo
           </button>
           <button className="btn big" onClick={props.onHelp}>
             ▶ Instrucciones
@@ -260,7 +263,7 @@ export function LevelSelect(props: { save: SaveData; money: number; onPick: (id:
 /* Resultado de nivel                                                  */
 /* ------------------------------------------------------------------ */
 
-export function LevelResultView(props: { result: LevelResult; allDone: boolean; onNext: () => void; onRetry: () => void; onMenu: () => void; onFinal: () => void }) {
+export function LevelResultView(props: { result: LevelResult; mode: 'solo' | 'host' | 'guest'; allDone: boolean; onNext: () => void; onRetry: () => void; onMenu: () => void; onFinal: () => void }) {
   const r = props.result
   const info = LEVELS[r.levelId - 1]
   const s = r.stats
@@ -306,9 +309,17 @@ export function LevelResultView(props: { result: LevelResult; allDone: boolean; 
           ))}
         </div>
         {!r.passed && <p className="muted">El dinero de este intento no se guarda. ¡Inténtalo otra vez!</p>}
+        {props.mode === 'guest' ? (
+          <div className="row">
+            <p className="muted waiting-inline">⏳ Esperando que el anfitrión elija el siguiente nivel…</p>
+            <button className="btn ghost" onClick={props.onMenu}>
+              Salir de la sala
+            </button>
+          </div>
+        ) : (
         <div className="row">
           <button className="btn ghost" onClick={props.onMenu}>
-            Niveles
+            {props.mode === 'host' ? '👥 Lobby' : 'Niveles'}
           </button>
           <button className="btn" onClick={props.onRetry}>
             ↻ Reintentar
@@ -324,6 +335,7 @@ export function LevelResultView(props: { result: LevelResult; allDone: boolean; 
             </button>
           )}
         </div>
+        )}
       </div>
     </div>
   )

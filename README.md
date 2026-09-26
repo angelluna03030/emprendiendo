@@ -34,6 +34,18 @@ robot abastecedor, máquinas de alta velocidad, brazo de ensamble automático).
 
 La música de fondo es `src/assets/sonido.mp3` y se puede apagar desde el menú o la pausa.
 
+## Modo cooperativo (hasta 3 jugadores)
+
+Menú → **👥 Jugar en equipo** → *Crear sala* → copia el link (`?sala=CODIGO`) y envíalo. Quien abre el link
+escribe su nombre y entra al lobby. El anfitrión elige el nivel y empieza.
+
+- Conexión directa entre navegadores con [PeerJS](https://peerjs.com) (usa su servidor público gratuito solo para
+  presentarse; no hay servidor propio). Funciona desplegado en Vercel.
+- El navegador del anfitrión simula la partida: su pestaña debe quedar abierta y visible.
+- Dinero y puntaje son del equipo. Con más jugadores: más zombis, jefes con más vida y más producción
+  (más piezas, lotes más grandes, meta de chips mayor, pedidos más grandes).
+- Algunas redes (colegios, universidades) bloquean conexiones P2P; si no conecta, prueben con datos móviles.
+
 ## Ficha técnica
 
 - **Nombre:** Production Game · Tech Factory

@@ -1325,3 +1325,174 @@ kbd {
   background: linear-gradient(90deg, #ef4444, #f59e0b);
   transition: width 0.15s;
 }
+
+/* ---------------- Cooperativo ---------------- */
+
+.btn.coop-btn {
+  background: #bfdbfe;
+}
+
+.lobby-error {
+  background: #fee2e2;
+  border-color: var(--red);
+  color: #991b1b;
+  font-weight: 600;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-weight: 600;
+  max-width: 360px;
+}
+
+.field input,
+.link-row input {
+  font-family: var(--font);
+  font-size: 1.1rem;
+  padding: 10px 14px;
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  background: #fff;
+  color: var(--ink);
+}
+
+.link-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.link-row input {
+  flex: 1;
+  min-width: 220px;
+  font-size: 0.95rem;
+}
+
+.code {
+  background: var(--yellow);
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  padding: 0 10px;
+  letter-spacing: 0.15em;
+}
+
+.players {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.player-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 3px solid var(--pc, var(--ink));
+  border-radius: 14px;
+  background: #fff;
+}
+
+.player-chip .dot,
+.mate .dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--pc);
+  border: 2px solid var(--ink);
+  flex: none;
+}
+
+.player-chip small {
+  color: var(--ink-soft);
+}
+
+.player-chip.empty {
+  border-style: dashed;
+  border-color: #cbd5e1;
+  color: var(--ink-soft);
+  justify-content: center;
+}
+
+.level-pick {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.level-mini {
+  font-family: var(--font);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px;
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  background: #fff;
+  cursor: pointer;
+  color: var(--ink);
+  border-top: 8px solid var(--accent);
+}
+
+.level-mini span {
+  font-size: 1.8rem;
+}
+
+.level-mini small {
+  color: var(--ink-soft);
+  text-align: center;
+}
+
+.level-mini.active {
+  background: #fef9c3;
+  box-shadow: 0 4px 0 var(--ink);
+}
+
+.level-mini:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.waiting {
+  text-align: center;
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+
+.waiting-inline {
+  font-weight: 600;
+  color: var(--ink-soft);
+  margin: 0;
+}
+
+.intro-team {
+  background: #dbeafe;
+  border-radius: 12px;
+  padding: 6px 12px;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.team {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
+}
+
+.mate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9rem;
+}
+
+.mate.me b {
+  text-decoration: underline;
+}
+
+.mate-hp {
+  margin-left: auto;
+}

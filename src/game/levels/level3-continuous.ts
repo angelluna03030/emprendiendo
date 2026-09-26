@@ -31,8 +31,13 @@ export class ContinuousLevel extends BaseLevel {
   deadline = null
   duration = 120
   maxTime = 125
-  minScore = 70
-  refScore = 170
+  minScore = Math.round(70 * this.f)
+  refScore = Math.round(170 * this.f)
+  /** Con más jugadores la línea es más rápida, se daña más y la meta es mayor. */
+  private goal = Math.round(GOAL * this.f)
+  private speedUp = 1 + 0.35 * (this.team - 1)
+  private breakEvery = 1 + 0.3 * (this.team - 1)
+  private visualTimer = 0
 
   private hopper = 60
   private hopperRig!: HopperRig
@@ -57,10 +62,44 @@ export class ContinuousLevel extends BaseLevel {
   private robot: ReturnType<typeof makeRobotArm> | null = null
   private robotTimer = -1
   private turbo = false
-  private cycle = CYCLE
+  private cycle = CYCLE / this.speedUp
   private shelf!: THREE.Object3D
 
   build(g: Game) {
+    g.sync(
+      'linea',
+      () => ({
+        hopper: this.hopper,
+        broken: this.machines.map((m) => m.broken),
+        chips: this.chips,
+        stopped: this.stopped,
+        stopTime: this.stopTime,
+        hasTech: this.hasTech,
+        hasRobot: this.hasRobot,
+        turbo: this.turbo,
+        cycle: this.cycle,
+        robotOn: this.robotTimer >= 0,
+        tech: this.tech ? [this.tech.root.position.x, this.tech.root.position.z, this.tech.root.rotation.y] : null,
+      }),
+      (v) => {
+        this.hopper = v.hopper
+        v.broken.forEach((b, i) => (this.machines[i].broken = b))
+        this.chips = v.chips
+        this.stopped = v.stopped
+        this.stopTime = v.stopTime
+        this.turbo = v.turbo
+        this.cycle = v.cycle
+        this.robotTimer = v.robotOn ? 1 : -1
+        if (v.hasTech && !this.tech) this.spawnTech(g)
+        if (v.hasRobot && !this.robot) this.spawnRobot(g)
+        this.hasTech = v.hasTech
+        this.hasRobot = v.hasRobot
+        if (this.tech && v.tech) {
+          this.tech.root.position.set(v.tech[0], 0, v.tech[1])
+          this.tech.root.rotation.y = v.tech[2]
+        }
+      },
+    )
     this.shelf = addShelf(g, 'obleas', -9.5, 3.2, 0x818cf8).object
     addTable(g, -6.2, 3.2)
     addTrash(g, -11.2, 6.5)
@@ -126,7 +165,7 @@ export class ContinuousLevel extends BaseLevel {
   private repair(g: Game, m: LineMachine) {
     if (!m.broken) return
     m.broken = false
-    g.toast(`🔧 ${m.name} reparada`, 'good')
+    g.toast(`🔧 ${m.name} reparada`, 'good', true)
   }
 
   upgrades(): Upgrade[] {
@@ -135,6 +174,18 @@ export class ContinuousLevel extends BaseLevel {
       { id: 'tech', label: '👷 Contratar técnico', desc: 'Personal extra que repara las máquinas', cost: TECH_COST, owned: this.hasTech, category: 'fabrica' },
       { id: 'turbo', label: '⚡ Máquinas de alta velocidad', desc: 'Producen 30% más rápido (gastan más materia prima)', cost: TURBO_COST, owned: this.turbo, category: 'fabrica' },
     ]
+  }
+
+  private spawnTech(g: Game) {
+    this.tech = makeWorker(0xf97316, C.white, 0x7c2d12)
+    this.tech.root.position.copy(this.techHome)
+    g.scene.add(this.tech.root)
+  }
+
+  private spawnRobot(g: Game) {
+    this.robot = makeRobotArm()
+    place(this.robot.group, -11.3, LINE_Z + 1.2)
+    g.scene.add(this.robot.group)
   }
 
   repairTargets(g: Game): RepairTarget[] {
@@ -152,30 +203,39 @@ export class ContinuousLevel extends BaseLevel {
   buy(id: string, g: Game) {
     if (id === 'tech' && !this.hasTech && g.spend(TECH_COST)) {
       this.hasTech = true
-      this.tech = makeWorker(0xf97316, C.white, 0x7c2d12)
-      this.tech.root.position.copy(this.techHome)
-      g.scene.add(this.tech.root)
-      g.toast('👷 Técnico contratado: reparará las máquinas por ti', 'good')
+      this.spawnTech(g)
+      g.toast('👷 Técnico contratado: reparará las máquinas por ti', 'good', true)
       g.sfx('done')
     }
     if (id === 'turbo' && !this.turbo && g.spend(TURBO_COST)) {
       this.turbo = true
-      this.cycle = CYCLE * 0.7
-      g.toast('⚡ Línea acelerada: más chips por minuto, pero la tolva se vacía más rápido', 'good')
+      this.cycle = (CYCLE * 0.7) / this.speedUp
+      g.toast('⚡ Línea acelerada: más chips por minuto, pero la tolva se vacía más rápido', 'good', true)
       g.sfx('done')
     }
     if (id === 'robot' && !this.hasRobot && g.spend(ROBOT_COST)) {
       this.hasRobot = true
-      this.robot = makeRobotArm()
-      place(this.robot.group, -11.3, LINE_Z + 1.2)
-      g.scene.add(this.robot.group)
-      g.toast('🤖 Robot instalado: abastecerá la tolva automáticamente (paga cada recarga)', 'good')
+      this.spawnRobot(g)
+      g.toast('🤖 Robot instalado: abastecerá la tolva automáticamente (paga cada recarga)', 'good', true)
       g.sfx('done')
     }
   }
 
   update(dt: number, g: Game) {
     const ending = g.elapsed >= this.duration
+    if (!g.isHost) {
+      // Invitado: chips de adorno mientras la línea funciona
+      if (!this.stopped && !ending) {
+        this.visualTimer += dt
+        if (this.visualTimer >= this.cycle) {
+          this.visualTimer -= this.cycle
+          this.spawnChip(g)
+        }
+      }
+      if (this.robot) this.robot.joint.rotation.y = this.robotTimer >= 0 ? Math.sin(g.elapsed * 6) * 0.9 : this.robot.joint.rotation.y * 0.9
+      this.updateVisuals(ending ? 0 : dt, g)
+      return
+    }
 
     // Averías aleatorias
     if (!ending && g.elapsed >= this.nextBreak) {
@@ -183,10 +243,10 @@ export class ContinuousLevel extends BaseLevel {
       if (working.length) {
         const m = working[Math.floor(Math.random() * working.length)]
         m.broken = true
-        g.toast(`🔥 ${m.name} se sobrecalentó — ¡repárala!`, 'bad')
+        g.toast(`🔥 ${m.name} se sobrecalentó — ¡repárala!`, 'bad', true)
         g.sfx('alarm')
       }
-      this.nextBreak = g.elapsed + 15 + Math.random() * 8
+      this.nextBreak = g.elapsed + (15 + Math.random() * 8) / this.breakEvery
     }
 
     // Estado de la línea
@@ -198,7 +258,7 @@ export class ContinuousLevel extends BaseLevel {
       g.reward(-10, empty ? 'Línea detenida: sin materia prima' : 'Línea detenida: máquina averiada', 'stops')
     } else if (!blocked && this.stopped) {
       this.stopped = false
-      g.toast('✅ Línea en marcha de nuevo', 'good')
+      g.toast('✅ Línea en marcha de nuevo', 'good', true)
     }
 
     if (this.stopped) {
@@ -215,7 +275,7 @@ export class ContinuousLevel extends BaseLevel {
     // Sensor de nivel: alerta automática
     if (this.hopper < LOW && !this.lowAlerted) {
       this.lowAlerted = true
-      g.toast('📡 Sensor: materia prima baja — abastece la tolva', 'warn')
+      g.toast('📡 Sensor: materia prima baja — abastece la tolva', 'warn', true)
       g.sfx('alarm')
     } else if (this.hopper >= LOW + 10) {
       this.lowAlerted = false
@@ -244,7 +304,7 @@ export class ContinuousLevel extends BaseLevel {
         if (g.spend(25, at(this.hopperRig.group, 3))) {
           g.stats.materials++
           this.refill(g, this.hopperRig.group)
-          g.toast('🤖 Robot abasteció la tolva', 'info')
+          g.toast('🤖 Robot abasteció la tolva', 'info', true)
         }
       }
     } else {
@@ -277,7 +337,7 @@ export class ContinuousLevel extends BaseLevel {
       if (this.techWork >= 3) {
         this.techWork = 0
         job.broken = false
-        g.toast(`👷 El técnico reparó ${job.name}`, 'good')
+        g.toast(`👷 El técnico reparó ${job.name}`, 'good', true)
       }
     } else {
       tech.legL.rotation.x = tech.legR.rotation.x = 0
@@ -293,6 +353,7 @@ export class ContinuousLevel extends BaseLevel {
       if (c.position.x > 8.6) {
         g.scene.remove(c)
         this.chipMeshes.splice(i, 1)
+        if (!g.isHost) continue
         this.chips++
         g.reward(2, 'Chip producido', 'correct', { at: new THREE.Vector3(9.9, 1.8, LINE_Z), silent: true })
         g.earn(15, new THREE.Vector3(9.9, 1.8, LINE_Z), true)
@@ -343,7 +404,7 @@ export class ContinuousLevel extends BaseLevel {
   }
 
   onEnd(g: Game) {
-    if (this.chips >= GOAL) g.reward(20, `Meta de ${GOAL} chips alcanzada`, 'correct')
+    if (this.chips >= this.goal) g.reward(20, `Meta de ${this.goal} chips alcanzada`, 'correct')
     if (this.availability(g) >= 85) g.reward(10, 'Alta disponibilidad de la línea (≥85%)', 'correct')
   }
 
@@ -365,7 +426,7 @@ export class ContinuousLevel extends BaseLevel {
 
   objectives(g: Game): Objective[] {
     return [
-      { text: `Producir ${GOAL} chips (${this.chips}/${GOAL})`, done: this.chips >= GOAL },
+      { text: `Producir ${this.goal} chips (${this.chips}/${this.goal})`, done: this.chips >= this.goal },
       { text: 'Mantener la tolva con materia prima', done: this.hopper > 0 },
       { text: 'Disponibilidad ≥ 85%', done: this.availability(g) >= 85 },
       { text: 'Aguantar 2:00 de producción', done: g.elapsed >= this.duration },
@@ -376,7 +437,7 @@ export class ContinuousLevel extends BaseLevel {
     const rate = g.elapsed > 5 ? Math.round((this.chips / g.elapsed) * 60) : 0
     const av = this.availability(g)
     return [
-      { label: 'Chips producidos', value: String(this.chips), tone: this.chips >= GOAL ? 'good' : undefined },
+      { label: 'Chips producidos', value: String(this.chips), tone: this.chips >= this.goal ? 'good' : undefined },
       { label: 'Ritmo', value: `${rate} chips/min` },
       { label: 'Disponibilidad', value: `${av}%`, tone: av >= 85 ? 'good' : av < 70 ? 'bad' : 'warn' },
       { label: 'Paradas de línea', value: String(g.stats.stops), tone: g.stats.stops ? 'bad' : undefined },

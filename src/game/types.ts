@@ -204,6 +204,10 @@ export interface HudState {
   weapons: WeaponSlot[]
   zombies: { enabled: boolean; alive: number; wave: number; nextWave: number; kills: number; bosses: { hp: number; max: number }[] }
   shopOpen: boolean
+  started: boolean
+  role: 'solo' | 'host' | 'client'
+  team: { name: string; color: number; hp: number; me: boolean; knocked: boolean }[]
+  minScore: number
   paused: boolean
   ended: boolean
   toasts: Toast[]

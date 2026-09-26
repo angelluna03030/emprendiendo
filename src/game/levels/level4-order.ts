@@ -52,8 +52,8 @@ export class OrderLevel extends BaseLevel {
   duration = null
   maxTime = 600
   zombieScale = 3
-  minScore = 60
-  refScore = 120
+  minScore = Math.round(60 * this.f)
+  refScore = Math.round(120 * this.f)
 
   private list: Order[] = [
     { id: 1, client: 'Colegio San José', arrive: 0, limit: 110, state: 'waiting', startedAt: 0, lines: [{ ram: 16, ssd: 512, need: 2, have: 0 }, { ram: 32, ssd: 1024, need: 1, have: 0 }] },
@@ -76,6 +76,39 @@ export class OrderLevel extends BaseLevel {
   private bossesSpawned = false
 
   build(g: Game) {
+    // Con más jugadores los pedidos son más grandes (y dan un poco más de tiempo)
+    for (const o of this.list) {
+      o.limit = Math.round(o.limit * (1 + 0.25 * (this.team - 1)))
+      for (const l of o.lines) l.need = Math.ceil(l.need * this.f)
+    }
+    g.sync(
+      'pedidos',
+      () => ({
+        list: this.list,
+        benches: this.benches.map((b) => ({ chasis: b.chasis, ram: b.ram, ssd: b.ssd, assembled: b.assembled })),
+        scans: this.scans,
+        delivered: this.delivered,
+        onTime: this.onTime,
+        assembleTime: this.assembleTime,
+        bossesSpawned: this.bossesSpawned,
+      }),
+      (v) => {
+        this.list = v.list
+        v.benches.forEach((nb, i) => {
+          const b = this.benches[i]
+          if (!b) return
+          const changed = b.chasis !== nb.chasis || b.ram !== nb.ram || b.ssd !== nb.ssd || b.assembled !== nb.assembled
+          Object.assign(b, nb)
+          if (changed) this.renderBench(b)
+        })
+        if (v.scans > this.scans) this.scanFlash = 0.6
+        this.scans = v.scans
+        this.delivered = v.delivered
+        this.onTime = v.onTime
+        this.assembleTime = v.assembleTime
+        this.bossesSpawned = v.bossesSpawned
+      },
+    )
     const shelves: [BuyKind, number][] = [['chasis', -9], ['ram16', -6.4], ['ram32', -3.8], ['ssd512', 3.8], ['ssd1tb', 6.4]]
     for (const [kind, x] of shelves) this.shelves[kind] = addShelf(g, kind, x, -6.4).object
     addTable(g, -7, 3)
@@ -182,7 +215,7 @@ export class OrderLevel extends BaseLevel {
   buy(id: string, g: Game) {
     if (id !== 'auto' || this.assembleTime < 2 || !g.spend(AUTO_COST)) return
     this.assembleTime = 0.5
-    g.toast('🦾 Brazo de ensamble instalado', 'good')
+    g.toast('🦾 Brazo de ensamble instalado', 'good', true)
     g.sfx('done')
   }
 
@@ -283,7 +316,7 @@ export class OrderLevel extends BaseLevel {
           this.onTime++
           g.reward(20, `Pedido #${o.id} entregado a tiempo`, 'correct', { at: spot.clone().setY(3.2) })
         } else {
-          g.toast(`Pedido #${o.id} completado (con retraso)`, 'warn')
+          g.toast(`Pedido #${o.id} completado (con retraso)`, 'warn', true)
         }
         o.state = 'done'
         this.idleSince = g.elapsed
@@ -296,6 +329,12 @@ export class OrderLevel extends BaseLevel {
   }
 
   update(dt: number, g: Game) {
+    if (g.isHost) this.simulate(g)
+    this.animate(dt, g)
+  }
+
+  /** Llegada de pedidos, retrasos y jefes (solo el anfitrión). */
+  private simulate(g: Game) {
     // Con los 3 pedidos entregados llegan los jefes finales
     if (this.ordersDone() && !this.bossesSpawned && g.combat.enabled) {
       this.bossesSpawned = true
@@ -307,7 +346,7 @@ export class OrderLevel extends BaseLevel {
         if (g.elapsed >= o.arrive || early) {
           o.state = 'active'
           o.startedAt = g.elapsed
-          g.toast(`🧑 Nuevo pedido #${o.id}: ${o.client}`, 'info')
+          g.toast(`🧑 Nuevo pedido #${o.id}: ${o.client}`, 'info', true)
           g.sfx('good')
         }
         break
@@ -319,7 +358,9 @@ export class OrderLevel extends BaseLevel {
         g.reward(-30, `Retraso en el pedido #${o.id}`, 'late')
       }
     }
+  }
 
+  private animate(dt: number, g: Game) {
     const current = this.active()[0]
     this.clientTag.set(current ? `🧑 Pedido #${current.id}` : this.ordersDone() ? '😄 ¡Gracias!' : '⏳ Esperando cliente…')
     this.client.root.visible = !!current || this.ordersDone()

@@ -2,12 +2,15 @@ import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { Game } from '../game/Game'
 import { LEVELS } from '../game/levels'
 import type { HudState, LevelId, LevelResult, ShopCategory } from '../game/types'
+import type { PlayerInfo, Session } from '../net/session'
 import { Hud } from './Hud'
 
 interface Props {
   levelId: LevelId
   money: number
   zombies: boolean
+  session?: Session | null
+  players?: PlayerInfo[]
   musicOn: boolean
   onToggleMusic: () => void
   onEnd: (result: LevelResult) => void
@@ -20,25 +23,35 @@ const CATEGORY: Record<ShopCategory, string> = {
   fabrica: '🏭 Robots y máquinas de la fábrica',
 }
 
-export function GameView({ levelId, money, zombies, musicOn, onToggleMusic, onEnd, onExit }: Props) {
+export function GameView({ levelId, money, zombies, session, players, musicOn, onToggleMusic, onEnd, onExit }: Props) {
   const mountRef = useRef<HTMLDivElement>(null)
   const gameRef = useRef<Game | null>(null)
   const [hud, setHud] = useState<HudState | null>(null)
   const [started, setStarted] = useState(false)
   const [attempt, setAttempt] = useState(0)
+  const [guestMenu, setGuestMenu] = useState(false)
   const info = LEVELS[levelId - 1]
+  const guest = !!session && !session.isHost
+  const team = players?.length ?? 1
+  const minScore = Math.round(info.minScore * (1 + 0.5 * (team - 1)))
 
   const handleEnd = useEffectEvent((result: LevelResult) => onEnd(result))
 
   useEffect(() => {
-    const game = new Game(mountRef.current!, levelId, money, { onHud: setHud, onEnd: (r) => handleEnd(r) }, { zombies })
+    const game = new Game(
+      mountRef.current!,
+      levelId,
+      money,
+      { onHud: setHud, onEnd: (r) => handleEnd(r), onEscape: () => setGuestMenu((v) => !v) },
+      { zombies, session: session ?? undefined, players },
+    )
     gameRef.current = game
     if (import.meta.env.DEV) Object.assign(window, { __game: game })
     return () => {
       game.dispose()
       gameRef.current = null
     }
-  }, [levelId, money, zombies, attempt])
+  }, [levelId, money, zombies, session, players, attempt])
 
   const start = () => {
     setStarted(true)
@@ -56,7 +69,7 @@ export function GameView({ levelId, money, zombies, musicOn, onToggleMusic, onEn
   return (
     <div className="game">
       <div ref={mountRef} className={`game-canvas ${zombies ? 'aim' : ''}`} />
-      {hud && started && (
+      {hud && (started || hud.started) && (
         <Hud
           hud={hud}
           onPause={() => game()?.setPaused(true)}
@@ -65,7 +78,7 @@ export function GameView({ levelId, money, zombies, musicOn, onToggleMusic, onEn
         />
       )}
 
-      {!started && (
+      {!started && !(guest && hud?.started) && (
         <div className="overlay">
           <div className="card intro" style={{ '--accent': info.color } as React.CSSProperties}>
             <div className="intro-badge">Nivel {info.id} de 4</div>
@@ -75,7 +88,7 @@ export function GameView({ levelId, money, zombies, musicOn, onToggleMusic, onEn
             <p className="intro-concept">{info.concept}</p>
             <div className="flow">
               {info.flow.map((f, i) => (
-                <span key={f}>
+                <span key={f + i}>
                   {i > 0 && <i>→</i>}
                   <b>{f}</b>
                 </span>
@@ -90,8 +103,13 @@ export function GameView({ levelId, money, zombies, musicOn, onToggleMusic, onEn
             <p className="intro-digital">
               <b>🤖 Tecnología digital:</b> {info.digital}
             </p>
+            {team > 1 && (
+              <div className="intro-team">
+                👥 Equipo de {team}: {players!.map((p) => p.name).join(', ')} · más zombis y más producción
+              </div>
+            )}
             <div className="intro-meta">
-              <span>🎯 Puntaje mínimo: {info.minScore}</span>
+              <span>🎯 Puntaje mínimo: {minScore}</span>
               <span>💰 Dinero: ${money}</span>
             </div>
             <div className="keys">
@@ -104,8 +122,12 @@ export function GameView({ levelId, money, zombies, musicOn, onToggleMusic, onEn
             </div>
             {zombies && <p className="intro-zombie">🧟 ¡Cuidado! A los 20 s llegan zombis: te atacan, dañan máquinas y roban materiales.</p>}
             <div className="row">
-              <button className="btn ghost" onClick={onExit}>← Volver</button>
-              <button className="btn primary big" onClick={start} autoFocus>¡A producir! ▶</button>
+              <button className="btn ghost" onClick={onExit}>{guest ? 'Salir de la sala' : '← Volver'}</button>
+              {guest ? (
+                <span className="waiting-inline">⏳ Esperando que el anfitrión empiece…</span>
+              ) : (
+                <button className="btn primary big" onClick={start} autoFocus>¡A producir! ▶</button>
+              )}
             </div>
           </div>
         </div>
@@ -118,7 +140,11 @@ export function GameView({ levelId, money, zombies, musicOn, onToggleMusic, onEn
               <h2>🛒 Tienda</h2>
               <div className="pill money">💰 ${hud.money}</div>
             </div>
-            <p className="muted">El juego está en pausa mientras compras. Lo que compras sirve durante este nivel.</p>
+            <p className="muted">
+              {session
+                ? '⚠️ En equipo el juego NO se pausa mientras compras. El dinero es de todo el equipo.'
+                : 'El juego está en pausa mientras compras. Lo que compras sirve durante este nivel.'}
+            </p>
             {(Object.keys(CATEGORY) as ShopCategory[]).map((cat) => {
               const items = hud.upgrades.filter((u) => u.category === cat)
               if (!items.length) return null
@@ -151,7 +177,28 @@ export function GameView({ levelId, money, zombies, musicOn, onToggleMusic, onEn
         </div>
       )}
 
-      {hud?.paused && (
+      {guest && hud?.paused && (
+        <div className="overlay">
+          <div className="card pause">
+            <h2>⏸ El anfitrión pausó el juego</h2>
+            <button className="btn ghost" onClick={onExit}>Salir de la sala</button>
+          </div>
+        </div>
+      )}
+
+      {guest && guestMenu && !hud?.paused && (
+        <div className="overlay" onClick={() => setGuestMenu(false)}>
+          <div className="card pause" onClick={(e) => e.stopPropagation()}>
+            <h2>Menú</h2>
+            <p className="muted">La partida sigue corriendo para tu equipo.</p>
+            <button className="btn primary big" onClick={() => setGuestMenu(false)} autoFocus>Continuar</button>
+            <button className="btn" onClick={onToggleMusic}>{musicOn ? '🎵 Música: sí' : '🎵 Música: no'}</button>
+            <button className="btn ghost" onClick={onExit}>Salir de la sala</button>
+          </div>
+        </div>
+      )}
+
+      {!guest && hud?.paused && (
         <div className="overlay">
           <div className="card pause">
             <h2>⏸ Pausa</h2>
@@ -159,8 +206,8 @@ export function GameView({ levelId, money, zombies, musicOn, onToggleMusic, onEn
               Continuar
             </button>
             <button className="btn" onClick={onToggleMusic}>{musicOn ? '🎵 Música: sí' : '🎵 Música: no'}</button>
-            <button className="btn" onClick={restart}>↻ Reiniciar nivel</button>
-            <button className="btn ghost" onClick={onExit}>Salir al menú</button>
+            {!session && <button className="btn" onClick={restart}>↻ Reiniciar nivel</button>}
+            <button className="btn ghost" onClick={onExit}>{session ? 'Volver al lobby' : 'Salir al menú'}</button>
           </div>
         </div>
       )}

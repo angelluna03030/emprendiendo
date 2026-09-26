@@ -1,56 +1,132 @@
 import * as THREE from 'three'
+import type { NetMsg, PlayerInfo, Session } from '../net/session'
+import { Combat, type WeaponId } from './combat'
 import { buildFactory } from './env'
-import { Combat } from './combat'
-import { ball, clearMaterialCache, makeHintArrow, makeWorker, type WorkerRig } from './models'
-import { ProgressSprite, TextSprite } from './sprites'
-import { play, type SfxName } from './sfx'
+import { makeItem } from './items'
 import { createLevel } from './levels'
-import type { HoldAction, HudState, Item, Level, LevelId, LevelResult, LevelStats, Prompt, StatKey, Station, Toast } from './types'
+import { ball, clearMaterialCache, makeHintArrow, makeWorker, type WorkerRig } from './models'
+import { play, type SfxName } from './sfx'
+import { ProgressSprite, TextSprite } from './sprites'
+import type { HoldAction, HudState, Item, ItemData, ItemKind, Level, LevelId, LevelResult, LevelStats, Prompt, StatKey, Station, Toast } from './types'
 
 const BOUNDS = { minX: -12.4, maxX: 12.4, minZ: -7.6, maxZ: 8.6 }
 const PLAYER_R = 0.38
 const SPEED = 5.8
 const REACH = 0.95
+const SNAP_RATE = 1 / 15
+const INPUT_RATE = 1 / 20
 
 export interface GameCallbacks {
   onHud: (hud: HudState) => void
   onEnd: (result: LevelResult) => void
+  /** Invitado: Esc abre su menú (no puede pausar a los demás). */
+  onEscape?: () => void
 }
 
 export interface GameOptions {
   zombies: boolean
+  session?: Session
+  players?: PlayerInfo[]
+}
+
+export type Role = 'solo' | 'host' | 'client'
+
+/** Un jugador de la fábrica (local o remoto). */
+export interface Player {
+  id: string
+  name: string
+  color: number
+  rig: WorkerRig
+  nameTag: TextSprite | null
+  pos: THREE.Vector3
+  facing: number
+  held: Item | null
+  heldKey: string
+  hp: number
+  knocked: number
+  lastHurt: number
+  hurtAt: number
+  /** Cambia cuando el anfitrión teletransporta al jugador (reaparecer). */
+  tp: number
+  weapon: WeaponId
+  gun: THREE.Group | null
+  gunKind: string
+  cooldown: number
+  firing: boolean
+  aim: THREE.Vector3
+  interactDown: boolean
+  working: boolean
+  moving: boolean
+  walkT: number
+  target: Station | null
+  netPos: THREE.Vector3
+  netFacing: number
+}
+
+type Fx =
+  | { t: 'f'; s: string; c: string; p: number[] }
+  | { t: 't'; s: string; tone: Toast['tone']; to: string | null }
+  | { t: 's'; n: SfxName }
+  | { t: 'b'; p: number[]; v: number[] }
+
+interface Snap {
+  st: boolean
+  pa: boolean
+  en: boolean
+  el: number
+  sc: number
+  mo: number
+  la: boolean
+  stats: LevelStats
+  pl: {
+    id: string
+    x: number
+    z: number
+    f: number
+    hp: number
+    kn: number
+    tp: number
+    w: WeaponId
+    fi: boolean
+    wk: boolean
+    mv: boolean
+    h: { k: ItemKind; d: ItemData } | null
+  }[]
+  sy: Record<string, unknown>
+  dm: number[]
+  hd: [string, number][]
+  cb: unknown
+  fx: Fx[]
 }
 
 /**
- * Motor del juego: escena Three.js, jugador, estaciones, puntaje y dinero.
- * La lógica específica de cada tipo de producción vive en `levels/`.
+ * Motor del juego: escena Three.js, jugadores, estaciones, puntaje y dinero.
+ * - solo: todo corre en este navegador.
+ * - host: simula la partida y envía el estado a los invitados.
+ * - client: dibuja el estado del anfitrión y le envía sus controles.
  */
 export class Game {
   readonly scene = new THREE.Scene()
   readonly level: Level
+  readonly role: Role
   readonly stats: LevelStats = { correct: 0, waste: 0, wrong: 0, late: 0, stops: 0, materials: 0, earned: 0, spent: 0 }
+  readonly players: Player[] = []
+  readonly me: Player
+  readonly combat: Combat
+  readonly teamSize: number
   score = 0
   money: number
   elapsed = 0
-  held: Item | null = null
-  readonly playerPos = new THREE.Vector3(0, 0, 3.5)
-  readonly rig: WorkerRig
-  readonly combat: Combat
 
+  /** Jugador sobre el que actúan las funciones de los niveles (take, held…). */
+  private actor: Player
   private readonly startMoney: number
+  private readonly session: Session | null
   private readonly renderer: THREE.WebGLRenderer
   private readonly camera: THREE.PerspectiveCamera
   private readonly container: HTMLElement
   private readonly cb: GameCallbacks
   private readonly stations: Station[] = []
-  private readonly damaged = new Map<Station, { label: TextSprite; smoke: number }>()
-  private readonly smoke: { mesh: THREE.Mesh; life: number }[] = []
-  private readonly arrow = makeHintArrow()
-  private readonly raycaster = new THREE.Raycaster()
-  private readonly aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -1)
-  private readonly reticle: THREE.Mesh
-  private aimT = -10
-  private shopOpen = false
   private readonly keys = new Set<string>()
   private readonly holdProgress = new Map<string, number>()
   private readonly toasts: (Toast & { until: number })[] = []
@@ -59,10 +135,16 @@ export class Game {
   private readonly bar = new ProgressSprite()
   private readonly camFocus = new THREE.Vector3(0, 0, 0)
   private readonly resize: ResizeObserver
-  private target: Station | null = null
-  private facing = Math.PI
-  private walkT = 0
-  private working = false
+  private readonly damaged = new Map<Station, { label: TextSprite; smoke: number }>()
+  private readonly smoke: { mesh: THREE.Mesh; life: number }[] = []
+  private readonly arrow = makeHintArrow()
+  private readonly raycaster = new THREE.Raycaster()
+  private readonly aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -1)
+  private readonly reticle: THREE.Mesh
+  private readonly syncs = new Map<string, { get: () => unknown; set: (v: never) => void; last: string }>()
+  private fx: Fx[] = []
+  private aimT = -10
+  private shopOpen = false
   private started = false
   private paused = false
   private ended = false
@@ -71,6 +153,7 @@ export class Game {
   private lateApplied = false
   private toastSeq = 0
   private hudTimer = 0
+  private netTimer = 0
   private lastT = 0
   private clockT = 0
 
@@ -79,6 +162,8 @@ export class Game {
     this.cb = cb
     this.money = money
     this.startMoney = money
+    this.session = opts.session ?? null
+    this.role = this.session ? (this.session.isHost ? 'host' : 'client') : 'solo'
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -108,8 +193,13 @@ export class Game {
 
     buildFactory(this.scene)
 
-    this.rig = makeWorker()
-    this.scene.add(this.rig.root)
+    // Jugadores
+    const infos = opts.players?.length ? opts.players : [{ id: 'solo', name: 'Tú', color: 0x3b82f6 }]
+    const myId = this.session?.meId ?? infos[0].id
+    infos.forEach((info, i) => this.players.push(this.makePlayer(info, i, infos.length > 1)))
+    this.me = this.players.find((p) => p.id === myId) ?? this.players[0]
+    this.actor = this.me
+    this.teamSize = this.players.length
 
     this.ring = new THREE.Mesh(
       new THREE.RingGeometry(0.85, 1.0, 40),
@@ -130,10 +220,14 @@ export class Game {
     this.reticle.rotation.x = -Math.PI / 2
     this.reticle.visible = false
     this.scene.add(this.reticle)
-    this.combat = new Combat(this, opts.zombies)
 
-    this.level = createLevel(levelId)
+    this.combat = new Combat(this, opts.zombies)
+    for (const p of this.players) this.combat.equip(p, 'pistola')
+
+    this.level = createLevel(levelId, this.teamSize)
     this.level.build(this)
+
+    this.session?.setGameHandler((from, msg) => this.onNet(from, msg))
 
     this.resize = new ResizeObserver(() => this.onResize())
     this.resize.observe(container)
@@ -150,9 +244,77 @@ export class Game {
     this.renderer.setAnimationLoop((t) => this.frame(t))
   }
 
+  private makePlayer(info: PlayerInfo, index: number, multi: boolean): Player {
+    const rig = makeWorker(info.color)
+    const pos = new THREE.Vector3(-1.4 + index * 1.4, 0, 3.5)
+    rig.root.position.copy(pos)
+    this.scene.add(rig.root)
+    let nameTag: TextSprite | null = null
+    if (multi) {
+      nameTag = new TextSprite(info.name, { bg: 'rgba(15,23,42,0.75)', fg: '#ffffff', lineHeight: 0.28 })
+      this.scene.add(nameTag.sprite)
+    }
+    return {
+      id: info.id,
+      name: info.name,
+      color: info.color,
+      rig,
+      nameTag,
+      pos,
+      facing: Math.PI,
+      held: null,
+      heldKey: '',
+      hp: 100,
+      knocked: 0,
+      lastHurt: -10,
+      hurtAt: -10,
+      tp: 0,
+      weapon: 'pistola',
+      gun: null,
+      gunKind: '',
+      cooldown: 0,
+      firing: false,
+      aim: new THREE.Vector3(0, 0, -5),
+      interactDown: false,
+      working: false,
+      moving: false,
+      walkT: 0,
+      target: null,
+      netPos: pos.clone(),
+      netFacing: Math.PI,
+    }
+  }
+
+  get isHost() {
+    return this.role !== 'client'
+  }
+
+  get multiplayer() {
+    return this.role !== 'solo'
+  }
+
   /* ---------------------------------------------------------------- */
-  /* API para los niveles                                              */
+  /* API para los niveles (actúa sobre el jugador "actor")             */
   /* ---------------------------------------------------------------- */
+
+  get held(): Item | null {
+    return this.actor.held
+  }
+
+  get playerPos(): THREE.Vector3 {
+    return this.actor.pos
+  }
+
+  /** Ejecuta fn como si la hiciera el jugador p (acciones remotas). */
+  withActor<T>(p: Player, fn: () => T): T {
+    const prev = this.actor
+    this.actor = p
+    try {
+      return fn()
+    } finally {
+      this.actor = prev
+    }
+  }
 
   addStation(station: Station) {
     this.stations.push(station)
@@ -160,19 +322,26 @@ export class Game {
     return station
   }
 
+  /** Estado que el anfitrión comparte con los invitados. */
+  sync<T>(key: string, get: () => T, set: (v: T) => void) {
+    this.syncs.set(key, { get, set: set as (v: never) => void, last: '' })
+  }
+
   take(item: Item) {
-    this.held = item
+    const p = this.actor
+    p.held = item
     item.mesh.position.set(0, 0, 0)
     item.mesh.rotation.set(0, 0, 0)
     item.mesh.scale.setScalar(1)
-    this.rig.hands.add(item.mesh)
+    p.rig.hands.add(item.mesh)
     this.sfx('pick')
   }
 
   release(): Item {
-    const item = this.held!
-    this.rig.hands.remove(item.mesh)
-    this.held = null
+    const p = this.actor
+    const item = p.held!
+    p.rig.hands.remove(item.mesh)
+    p.held = null
     this.sfx('drop')
     return item
   }
@@ -190,7 +359,7 @@ export class Game {
     const at = opts.at ?? this.playerPos.clone().setY(2.2)
     this.float(`${points >= 0 ? '+' : ''}${points}`, points >= 0 ? '#16a34a' : '#dc2626', at)
     if (!opts.silent) {
-      this.toast(`${points >= 0 ? '+' : ''}${points} · ${text}`, points >= 0 ? 'good' : 'bad')
+      this.toast(`${points >= 0 ? '+' : ''}${points} · ${text}`, points >= 0 ? 'good' : 'bad', true)
       this.sfx(points >= 0 ? 'good' : 'bad')
     }
   }
@@ -214,24 +383,6 @@ export class Game {
     return true
   }
 
-  toast(text: string, tone: Toast['tone'] = 'info') {
-    const same = this.toasts.findIndex((t) => t.text === text)
-    if (same >= 0) this.toasts.splice(same, 1)
-    this.toasts.push({ id: ++this.toastSeq, text, tone, until: this.clockT + 3.2 })
-    while (this.toasts.length > 4) this.toasts.shift()
-  }
-
-  float(text: string, color: string, at: THREE.Vector3) {
-    const label = new TextSprite(text, { bg: null, fg: color, stroke: '#ffffff', lineHeight: 0.55 })
-    label.sprite.position.copy(at)
-    this.scene.add(label.sprite)
-    this.floats.push({ label, life: 1.3 })
-  }
-
-  sfx(name: SfxName) {
-    play(name)
-  }
-
   /** Pérdida forzada (robos, derribos): el dinero no baja de 0. */
   loseMoney(amount: number, at?: THREE.Vector3) {
     const lost = Math.min(this.money, amount)
@@ -239,6 +390,50 @@ export class Game {
     this.money -= lost
     this.stats.spent += lost
     this.float(`-$${lost}`, '#b45309', (at ?? this.playerPos.clone().setY(2.4)).clone())
+  }
+
+  /**
+   * Aviso en pantalla. Los avisos personales (acciones de un jugador remoto)
+   * solo los ve ese jugador; los de equipo (`team`) los ven todos.
+   */
+  toast(text: string, tone: Toast['tone'] = 'info', team = false) {
+    const personal = !team && this.actor !== this.me
+    const to = personal ? this.actor.id : null
+    if (this.role === 'host') this.fx.push({ t: 't', s: text, tone, to })
+    if (to === null || to === this.me.id) this.showToast(text, tone)
+  }
+
+  private showToast(text: string, tone: Toast['tone']) {
+    const same = this.toasts.findIndex((t) => t.text === text)
+    if (same >= 0) this.toasts.splice(same, 1)
+    this.toasts.push({ id: ++this.toastSeq, text, tone, until: this.clockT + 3.2 })
+    while (this.toasts.length > 4) this.toasts.shift()
+  }
+
+  float(text: string, color: string, at: THREE.Vector3) {
+    if (this.role === 'host') this.fx.push({ t: 'f', s: text, c: color, p: at.toArray() })
+    this.showFloat(text, color, at)
+  }
+
+  private showFloat(text: string, color: string, at: THREE.Vector3) {
+    const label = new TextSprite(text, { bg: null, fg: color, stroke: '#ffffff', lineHeight: 0.55 })
+    label.sprite.position.copy(at)
+    this.scene.add(label.sprite)
+    this.floats.push({ label, life: 1.3 })
+  }
+
+  sfx(name: SfxName) {
+    if (this.role === 'host') this.fx.push({ t: 's', n: name })
+    play(name)
+  }
+
+  /** Disparo visual para los invitados (el daño solo lo calcula el anfitrión). */
+  netBullet(origin: THREE.Vector3, vel: THREE.Vector3) {
+    if (this.role === 'host') this.fx.push({ t: 'b', p: origin.toArray(), v: [vel.x, vel.z] })
+  }
+
+  get isLate() {
+    return this.lateApplied
   }
 
   get allStations(): readonly Station[] {
@@ -253,26 +448,35 @@ export class Game {
   damageStation(st: Station) {
     if (st.onDamage) {
       st.onDamage(this)
-      this.toast(`🧟 ¡Un zombi dañó ${st.name}!`, 'bad')
+      this.toast(`🧟 ¡Un zombi dañó ${st.name}!`, 'bad', true)
       this.sfx('alarm')
       return
     }
     if (this.damaged.has(st)) return
+    this.markDamaged(st)
+    this.toast(`🧟 ¡Un zombi dañó ${st.name}! Mantén E junto a ella para repararla`, 'bad', true)
+    this.sfx('alarm')
+  }
+
+  private markDamaged(st: Station) {
     const label = new TextSprite('🧟 ¡Dañada! Mantén E', { bg: 'rgba(220,38,38,0.92)', fg: '#ffffff', lineHeight: 0.34 })
     label.sprite.position.copy(st.object.position).setY(3.1)
     this.scene.add(label.sprite)
     this.damaged.set(st, { label, smoke: 0 })
-    this.toast(`🧟 ¡Un zombi dañó ${st.name}! Mantén E junto a ella para repararla`, 'bad')
-    this.sfx('alarm')
   }
 
   repairStation(st: Station) {
+    if (!this.damaged.has(st)) return
+    this.unmarkDamaged(st)
+    this.toast(`🔧 ${st.name} reparada`, 'good', true)
+  }
+
+  private unmarkDamaged(st: Station) {
     const d = this.damaged.get(st)
     if (!d) return
     this.scene.remove(d.label.sprite)
     disposeObject(d.label.sprite)
     this.damaged.delete(st)
-    this.toast(`🔧 ${st.name} reparada`, 'good')
   }
 
   /** Acción de mantener E, considerando si la estación está dañada. */
@@ -284,21 +488,18 @@ export class Game {
     return st.hold?.(this) ?? null
   }
 
-  get isLate() {
-    return this.lateApplied
-  }
-
   /* ---------------------------------------------------------------- */
   /* Control desde React                                               */
   /* ---------------------------------------------------------------- */
 
   start() {
+    if (this.role === 'client') return
     this.started = true
     this.lastT = 0
   }
 
   setPaused(value: boolean) {
-    if (!this.started || this.ended) return
+    if (!this.started || this.ended || this.role === 'client') return
     this.paused = value
     this.keys.clear()
     this.emitHud()
@@ -306,12 +507,22 @@ export class Game {
 
   buy(id: string) {
     if (!this.started || this.ended) return
-    if (!this.combat.buy(id)) this.level.buy(id, this)
+    if (this.role === 'client') {
+      this.session?.send({ t: 'buy', id })
+      return
+    }
+    this.doBuy(this.me, id)
     this.emitHud()
   }
 
+  private doBuy(p: Player, id: string) {
+    this.withActor(p, () => {
+      if (!this.combat.buy(p, id)) this.level.buy(id, this)
+    })
+  }
+
   selectWeapon(id: string) {
-    this.combat.select(id)
+    this.combat.select(this.me, id as WeaponId, true)
     this.emitHud()
   }
 
@@ -319,12 +530,13 @@ export class Game {
     if (!this.started || this.ended || this.paused) return
     this.shopOpen = open
     this.keys.clear()
-    this.combat.firing = false
+    this.me.firing = false
     this.emitHud()
   }
 
   dispose() {
     this.renderer.setAnimationLoop(null)
+    this.session?.setGameHandler(null)
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('keyup', this.onKeyUp)
     window.removeEventListener('blur', this.onBlur)
@@ -334,7 +546,6 @@ export class Game {
     canvas.removeEventListener('pointerdown', this.onPointerDown)
     canvas.removeEventListener('contextmenu', this.onContextMenu)
     this.resize.disconnect()
-    if (this.held) disposeObject(this.held.mesh, false)
     disposeObject(this.scene)
     clearMaterialCache()
     this.renderer.dispose()
@@ -350,11 +561,22 @@ export class Game {
     this.lastT = t
     this.clockT += dt
 
-    if (this.started && !this.paused && !this.shopOpen) this.tick(dt)
+    // En cooperativo la tienda no pausa el mundo.
+    const frozen = this.paused || (this.shopOpen && !this.multiplayer)
+    if (this.role === 'client') this.tickClient(dt)
+    else if (this.started && !frozen) this.tick(dt)
 
+    this.animatePlayers(dt)
     this.updateCamera(dt)
     this.updateFloats(dt)
     this.renderer.render(this.scene, this.camera)
+
+    this.netTimer -= dt
+    if (this.netTimer <= 0) {
+      this.netTimer = this.role === 'host' ? SNAP_RATE : INPUT_RATE
+      if (this.role === 'host') this.sendSnapshot()
+      if (this.role === 'client') this.sendInput()
+    }
 
     this.hudTimer -= dt
     if (this.hudTimer <= 0) {
@@ -365,9 +587,11 @@ export class Game {
 
   private tick(dt: number) {
     if (!this.ended) this.elapsed += dt
-    this.updateTarget()
-    this.handleHold(dt)
-    this.movePlayer(dt)
+    this.moveLocal(dt)
+    for (const p of this.players) {
+      this.updateTarget(p)
+      this.handleHold(p, dt)
+    }
     this.level.update(dt, this)
     this.combat.update(dt, !this.ended)
     this.updateDamage(dt)
@@ -389,6 +613,21 @@ export class Game {
     }
     const completed = L.isComplete(this) || (L.duration !== null && this.elapsed >= L.duration)
     if (completed || this.elapsed >= L.maxTime) this.finish()
+  }
+
+  /** Invitado: solo mueve a su jugador; lo demás llega del anfitrión. */
+  private tickClient(dt: number) {
+    if (!this.started || this.paused || this.ended) {
+      this.combat.updateView(dt)
+      return
+    }
+    this.moveLocal(dt)
+    this.updateTarget(this.me)
+    this.handleHold(this.me, dt)
+    this.level.update(dt, this)
+    this.combat.updateView(dt)
+    this.updateDamage(dt)
+    this.updateHint()
   }
 
   private finish() {
@@ -425,57 +664,76 @@ export class Game {
   }
 
   /* ---------------------------------------------------------------- */
-  /* Jugador                                                           */
+  /* Jugadores                                                         */
   /* ---------------------------------------------------------------- */
 
-  private movePlayer(dt: number) {
+  private moveLocal(dt: number) {
+    const p = this.me
     const dir = new THREE.Vector3()
-    const knocked = this.combat.knocked > 0
-    if (!this.working && !knocked) {
+    if (!p.working && p.knocked <= 0 && !this.shopOpen) {
       if (this.keys.has('w') || this.keys.has('arrowup')) dir.z -= 1
       if (this.keys.has('s') || this.keys.has('arrowdown')) dir.z += 1
       if (this.keys.has('a') || this.keys.has('arrowleft')) dir.x -= 1
       if (this.keys.has('d') || this.keys.has('arrowright')) dir.x += 1
     }
-    const moving = dir.lengthSq() > 0
-    // Mientras disparas, el personaje mira hacia donde apunta el mouse.
-    const aiming = this.combat.enabled && this.combat.firing && !knocked
-    if (moving) {
+    p.moving = dir.lengthSq() > 0
+    const aiming = this.combat.enabled && p.firing && p.knocked <= 0
+    if (p.moving) {
       dir.normalize()
-      this.playerPos.addScaledVector(dir, SPEED * dt)
+      p.pos.addScaledVector(dir, SPEED * dt)
     }
-    if (aiming || moving) {
-      const d = aiming ? this.combat.aimDir() : dir
+    if (aiming || p.moving) {
+      const d = aiming ? this.combat.aimDir(p) : dir
       const want = Math.atan2(d.x, d.z)
-      let diff = want - this.facing
+      let diff = want - p.facing
       diff = Math.atan2(Math.sin(diff), Math.cos(diff))
-      this.facing += diff * Math.min(1, dt * (aiming ? 25 : 14))
+      p.facing += diff * Math.min(1, dt * (aiming ? 25 : 14))
     }
-    this.collide()
+    this.collide(p.pos)
+  }
 
-    const rig = this.rig
-    rig.root.position.copy(this.playerPos)
-    rig.root.rotation.y = this.facing
-    if (moving) this.walkT += dt * 11
-    else this.walkT *= 0.8
-    const swing = Math.sin(this.walkT) * (moving ? 0.7 : 0)
-    rig.legL.rotation.x = swing
-    rig.legR.rotation.x = -swing
-    rig.body.position.y = moving ? Math.abs(Math.sin(this.walkT)) * 0.08 : 0
-    if (this.held) {
-      rig.armL.rotation.x = rig.armR.rotation.x = -1.2
-    } else if (this.working) {
-      const w = Math.sin(this.clockT * 22) * 0.5
-      rig.armL.rotation.x = -1.0 + w
-      rig.armR.rotation.x = -1.0 - w
-    } else {
-      rig.armL.rotation.x = -swing
-      rig.armR.rotation.x = swing
+  /** Dibuja a todos los jugadores (posición, animación, arma y nombre). */
+  private animatePlayers(dt: number) {
+    for (const p of this.players) {
+      const remote = p !== this.me && this.role !== 'solo'
+      if (remote) {
+        // Suaviza el movimiento recibido por red
+        p.pos.lerp(p.netPos, Math.min(1, dt * 12))
+        let diff = p.netFacing - p.facing
+        diff = Math.atan2(Math.sin(diff), Math.cos(diff))
+        p.facing += diff * Math.min(1, dt * 12)
+      }
+      const rig = p.rig
+      rig.root.position.copy(p.pos)
+      rig.root.rotation.y = p.facing
+      if (p.knocked > 0) {
+        rig.root.rotation.x = -Math.PI / 2
+        rig.root.position.y = 0.3
+      } else {
+        rig.root.rotation.x = 0
+      }
+      if (p.moving) p.walkT += dt * 11
+      else p.walkT *= 0.8
+      const swing = Math.sin(p.walkT) * (p.moving ? 0.7 : 0)
+      rig.legL.rotation.x = swing
+      rig.legR.rotation.x = -swing
+      rig.body.position.y = p.moving ? Math.abs(Math.sin(p.walkT)) * 0.08 : 0
+      if (p.held) {
+        rig.armL.rotation.x = rig.armR.rotation.x = -1.2
+      } else if (p.working) {
+        const w = Math.sin(this.clockT * 22) * 0.5
+        rig.armL.rotation.x = -1.0 + w
+        rig.armR.rotation.x = -1.0 - w
+      } else {
+        rig.armL.rotation.x = -swing
+        rig.armR.rotation.x = swing
+      }
+      if (this.combat.enabled && p.firing && p.knocked <= 0) rig.armR.rotation.x = -1.5
+      if (p.nameTag) p.nameTag.sprite.position.set(p.pos.x, 2.25, p.pos.z)
     }
   }
 
-  private collide() {
-    const p = this.playerPos
+  private collide(p: THREE.Vector3) {
     for (const st of this.stations) {
       const [w, d] = st.size
       if (!w || !d) continue
@@ -498,13 +756,14 @@ export class Game {
     p.z = THREE.MathUtils.clamp(p.z, BOUNDS.minZ, BOUNDS.maxZ)
   }
 
-  private updateTarget() {
+  private updateTarget(pl: Player) {
     if (this.ended) {
-      this.target = null
+      pl.target = null
+      if (pl === this.me) this.ring.visible = false
       return
     }
-    const p = this.playerPos
-    const fwd = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing))
+    const p = pl.pos
+    const fwd = new THREE.Vector3(Math.sin(pl.facing), 0, Math.cos(pl.facing))
     let best: Station | null = null
     let bestScore = Infinity
     for (const st of this.stations) {
@@ -521,7 +780,8 @@ export class Game {
         best = st
       }
     }
-    this.target = best
+    pl.target = best
+    if (pl !== this.me) return
     if (best) {
       const [w, d] = best.size
       this.ring.visible = true
@@ -533,56 +793,68 @@ export class Game {
     }
   }
 
-  private handleHold(dt: number) {
-    this.working = false
-    this.bar.sprite.visible = false
-    const st = this.target
-    if (!st || this.combat.knocked > 0) return
-    const action = this.holdOf(st)
+  private handleHold(p: Player, dt: number) {
+    p.working = false
+    if (p === this.me) this.bar.sprite.visible = false
+    const st = p.target
+    if (!st || p.knocked > 0) return
+    const action = this.withActor(p, () => this.holdOf(st))
     if (!action) return
     const key = `${this.stations.indexOf(st)}:${action.key}`
     let progress = this.holdProgress.get(key) ?? 0
-    if (this.keys.has('interact')) {
-      this.working = true
-      progress += dt
-      if (progress >= action.duration) {
-        this.holdProgress.delete(key)
-        this.working = false
-        this.sfx('done')
-        action.onDone()
-        return
+    if (p.interactDown) {
+      p.working = true
+      // El invitado solo muestra la animación; el anfitrión avanza el trabajo.
+      if (this.isHost) {
+        progress += dt
+        if (progress >= action.duration) {
+          this.holdProgress.delete(key)
+          p.working = false
+          this.withActor(p, () => {
+            this.sfx('done')
+            action.onDone()
+          })
+          return
+        }
+        this.holdProgress.set(key, progress)
       }
-      this.holdProgress.set(key, progress)
     }
-    if (progress > 0) {
+    if (p === this.me && progress > 0) {
       this.bar.sprite.visible = true
       this.bar.set(progress / action.duration)
       this.bar.sprite.position.set(st.object.position.x, 2.7, st.object.position.z)
     }
   }
 
-  private pressInteract() {
-    if (!this.started || this.paused || this.ended || this.combat.knocked > 0) return
-    const st = this.target
-    if (!st) return
-    if (this.holdOf(st)) return
-    if (this.damaged.has(st)) {
-      this.toast('Suelta lo que llevas para reparar la máquina', 'info')
+  private pressInteract(p: Player) {
+    if (!this.started || this.paused || this.ended || p.knocked > 0) return
+    if (this.role === 'client') {
+      // Se envía la posición exacta para que el anfitrión vea la misma estación
+      this.session?.send({ t: 'e', p: [p.pos.x, p.pos.z], f: p.facing })
       return
     }
-    if (st.interact && st.prompt?.(this)) st.interact(this)
-    else {
-      const info = st.info?.(this)
-      if (info) {
-        this.toast(info, 'info')
-        this.sfx('error')
+    const st = p.target
+    if (!st) return
+    this.withActor(p, () => {
+      if (this.holdOf(st)) return
+      if (this.damaged.has(st)) {
+        this.toast('Suelta lo que llevas para reparar la máquina', 'info')
+        return
       }
-    }
+      if (st.interact && st.prompt?.(this)) st.interact(this)
+      else {
+        const info = st.info?.(this)
+        if (info) {
+          this.toast(info, 'info')
+          this.sfx('error')
+        }
+      }
+    })
   }
 
   private promptText(): Prompt | null {
-    if (this.combat.knocked > 0) return { text: '😵 Derribado… te levantas en un momento', kind: 'info' }
-    const st = this.target
+    if (this.me.knocked > 0) return { text: '😵 Derribado… te levantas en un momento', kind: 'info' }
+    const st = this.me.target
     if (!st || this.ended) return null
     const hold = this.holdOf(st)
     if (hold) return { text: hold.label, kind: 'hold' }
@@ -591,6 +863,184 @@ export class Game {
     if (p) return { text: p, kind: 'tap' }
     const info = st.info?.(this)
     return { text: info ? `${st.name} — ${info}` : st.name, kind: 'info' }
+  }
+
+  /** Quita a un jugador que se desconectó. */
+  private removePlayer(id: string) {
+    const i = this.players.findIndex((p) => p.id === id)
+    if (i < 0 || this.players[i] === this.me) return
+    const p = this.players[i]
+    this.scene.remove(p.rig.root)
+    if (p.nameTag) this.scene.remove(p.nameTag.sprite)
+    this.players.splice(i, 1)
+    this.showToast(`👋 ${p.name} salió de la partida`, 'warn')
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Red                                                               */
+  /* ---------------------------------------------------------------- */
+
+  private onNet(from: string, msg: NetMsg) {
+    if (this.role === 'client') {
+      if (msg.t === 'snap') this.applySnapshot(msg as unknown as Snap)
+      return
+    }
+    if (msg.t === 'leave') {
+      this.removePlayer(from)
+      return
+    }
+    const p = this.players.find((pl) => pl.id === from)
+    if (!p) return
+    switch (msg.t) {
+      case 'in':
+        p.netPos.set(msg.p[0], 0, msg.p[1])
+        p.netFacing = msg.f
+        p.aim.set(msg.a[0], 1, msg.a[1])
+        p.firing = !!msg.fi
+        p.interactDown = !!msg.h
+        p.moving = !!msg.mv
+        if (msg.w !== p.weapon) this.combat.select(p, msg.w, false)
+        break
+      case 'e':
+        p.netPos.set(msg.p[0], 0, msg.p[1])
+        p.pos.copy(p.netPos)
+        p.facing = p.netFacing = msg.f
+        this.updateTarget(p)
+        this.pressInteract(p)
+        break
+      case 'buy':
+        if (this.started && !this.ended) this.doBuy(p, String(msg.id))
+        break
+    }
+  }
+
+  private sendInput() {
+    const p = this.me
+    this.session?.send({
+      t: 'in',
+      p: [p.pos.x, p.pos.z],
+      f: p.facing,
+      a: [p.aim.x, p.aim.z],
+      fi: p.firing,
+      h: p.interactDown,
+      mv: p.moving,
+      w: p.weapon,
+    })
+  }
+
+  private sendSnapshot() {
+    if (!this.session) return
+    const sy: Record<string, unknown> = {}
+    for (const [k, s] of this.syncs) sy[k] = s.get()
+    const snap: Snap = {
+      st: this.started,
+      pa: this.paused,
+      en: this.ended,
+      el: this.elapsed,
+      sc: this.score,
+      mo: this.money,
+      la: this.lateApplied,
+      stats: this.stats,
+      pl: this.players.map((p) => ({
+        id: p.id,
+        x: p.pos.x,
+        z: p.pos.z,
+        f: p.facing,
+        hp: Math.round(p.hp),
+        kn: p.knocked,
+        tp: p.tp,
+        w: p.weapon,
+        fi: p.firing,
+        wk: p.working,
+        mv: p.moving,
+        h: p.held ? { k: p.held.kind, d: p.held.data } : null,
+      })),
+      sy,
+      dm: [...this.damaged.keys()].map((st) => this.stations.indexOf(st)),
+      hd: [...this.holdProgress.entries()],
+      cb: this.combat.snapshot(),
+      fx: this.fx,
+    }
+    this.fx = []
+    this.session.broadcast({ t: 'snap', ...snap })
+  }
+
+  private applySnapshot(s: Snap) {
+    this.started = s.st
+    this.paused = s.pa
+    this.ended = s.en
+    this.elapsed = s.el
+    this.score = s.sc
+    this.money = s.mo
+    this.lateApplied = s.la
+    Object.assign(this.stats, s.stats)
+
+    for (const ps of s.pl) {
+      const p = this.players.find((pl) => pl.id === ps.id)
+      if (!p) continue
+      if (p === this.me) {
+        if (ps.tp !== p.tp) {
+          p.tp = ps.tp
+          p.pos.set(ps.x, 0, ps.z)
+        }
+        if (ps.hp < p.hp) p.hurtAt = this.elapsed
+      } else {
+        p.netPos.set(ps.x, 0, ps.z)
+        p.netFacing = ps.f
+        p.firing = ps.fi
+        p.working = ps.wk
+        p.moving = ps.mv
+      }
+      p.hp = ps.hp
+      p.knocked = ps.kn
+      if (ps.w !== p.weapon || !p.gun) this.combat.equip(p, ps.w)
+      this.mirrorHeld(p, ps.h)
+    }
+    // Quitar jugadores que ya no están
+    for (const p of [...this.players]) if (!s.pl.some((ps) => ps.id === p.id) && p !== this.me) this.removePlayer(p.id)
+
+    for (const [k, v] of Object.entries(s.sy)) {
+      const entry = this.syncs.get(k)
+      if (!entry) continue
+      const json = JSON.stringify(v)
+      if (json === entry.last) continue
+      entry.last = json
+      entry.set(v as never)
+    }
+
+    const dm = new Set(s.dm.map((i) => this.stations[i]))
+    for (const st of [...this.damaged.keys()]) if (!dm.has(st)) this.unmarkDamaged(st)
+    for (const st of dm) if (st && !this.damaged.has(st)) this.markDamaged(st)
+
+    this.holdProgress.clear()
+    for (const [k, v] of s.hd) this.holdProgress.set(k, v)
+
+    this.combat.restore(s.cb)
+
+    for (const f of s.fx) {
+      if (f.t === 'f') this.showFloat(f.s, f.c, new THREE.Vector3().fromArray(f.p))
+      else if (f.t === 't') {
+        if (f.to === null || f.to === this.me.id) this.showToast(f.s, f.tone)
+      } else if (f.t === 's') play(f.n)
+      else if (f.t === 'b') this.combat.visualBullet(new THREE.Vector3().fromArray(f.p), new THREE.Vector3(f.v[0], 0, f.v[1]))
+    }
+  }
+
+  /** Invitado: copia lo que lleva cada jugador según el anfitrión. */
+  private mirrorHeld(p: Player, h: { k: ItemKind; d: ItemData } | null) {
+    const key = h ? JSON.stringify(h) : ''
+    if (key === p.heldKey) return
+    p.heldKey = key
+    if (p.held) {
+      p.rig.hands.remove(p.held.mesh)
+      disposeObject(p.held.mesh, false)
+      p.held = null
+    }
+    if (h) {
+      const item = makeItem(h.k, h.d)
+      p.held = item
+      p.rig.hands.add(item.mesh)
+    }
   }
 
   /* ---------------------------------------------------------------- */
@@ -602,7 +1052,8 @@ export class Game {
     // En pantallas angostas la cámara se aleja y sigue más al jugador en X.
     const narrow = aspect < 1.2
     const dist = narrow ? 1.25 : aspect < 1.6 ? 1.12 : 1
-    const goal = new THREE.Vector3(this.playerPos.x * (narrow ? 0.75 : 0.35), 0, (narrow ? -1.6 : -0.3) + this.playerPos.z * 0.3)
+    const pos = this.me.pos
+    const goal = new THREE.Vector3(pos.x * (narrow ? 0.75 : 0.35), 0, (narrow ? -1.6 : -0.3) + pos.z * 0.3)
     this.camFocus.lerp(goal, Math.min(1, dt * 3 || 1))
     this.camera.position.set(this.camFocus.x, 16.5 * dist, this.camFocus.z + 12.5 * dist)
     this.camera.lookAt(this.camFocus)
@@ -627,6 +1078,7 @@ export class Game {
 
   private emitHud() {
     const L = this.level
+    const me = this.me
     this.cb.onHud({
       levelId: L.id,
       score: this.score,
@@ -640,14 +1092,14 @@ export class Game {
       metrics: L.metrics(this),
       alerts: [...L.alerts(this), ...[...this.damaged.keys()].map((s) => `🧟 ${s.name} dañada — mantén E para reparar`)],
       orders: L.orders(this),
-      upgrades: [...this.combat.shopItems(), ...L.upgrades(this)],
+      upgrades: [...this.combat.shopItems(me), ...L.upgrades(this)],
       prompt: this.started ? this.promptText() : null,
-      held: this.held?.label ?? null,
+      held: me.held?.label ?? null,
       hint: this.started && !this.ended ? (L.hint(this)?.text ?? null) : null,
-      hp: Math.round(this.combat.hp),
-      knocked: Math.max(0, this.combat.knocked),
-      hurtAt: this.combat.hurtAt,
-      weapons: this.combat.weapons(),
+      hp: Math.round(me.hp),
+      knocked: Math.max(0, me.knocked),
+      hurtAt: me.hurtAt,
+      weapons: this.combat.weapons(me),
       zombies: {
         enabled: this.combat.enabled,
         alive: this.combat.alive,
@@ -657,6 +1109,10 @@ export class Game {
         bosses: this.combat.bosses(),
       },
       shopOpen: this.shopOpen,
+      started: this.started,
+      role: this.role,
+      team: this.players.map((p) => ({ name: p.name, color: p.color, hp: Math.round(p.hp), me: p === me, knocked: p.knocked > 0 })),
+      minScore: L.minScore,
       paused: this.paused,
       ended: this.ended,
       toasts: this.toasts.map(({ id, text, tone }) => ({ id, text, tone })),
@@ -672,7 +1128,7 @@ export class Game {
   }
 
   /* ---------------------------------------------------------------- */
-  /* Teclado                                                           */
+  /* Teclado y mouse                                                   */
   /* ---------------------------------------------------------------- */
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -680,6 +1136,7 @@ export class Game {
     if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault()
     if (k === 'escape') {
       if (this.shopOpen) this.setShop(false)
+      else if (this.role === 'client') this.cb.onEscape?.()
       else this.setPaused(!this.paused)
       return
     }
@@ -690,13 +1147,13 @@ export class Game {
       return
     }
     if (this.shopOpen) return
-    if (this.combat.selectByKey(k)) {
+    if (this.combat.selectByKey(this.me, k)) {
       this.emitHud()
       return
     }
     if (k === 'e' || k === ' ') {
-      if (!e.repeat) this.pressInteract()
-      this.keys.add('interact')
+      if (!e.repeat) this.pressInteract(this.me)
+      this.me.interactDown = true
       return
     }
     this.keys.add(k)
@@ -704,17 +1161,15 @@ export class Game {
 
   private onKeyUp = (e: KeyboardEvent) => {
     const k = e.key.toLowerCase()
-    this.keys.delete(k === 'e' || k === ' ' ? 'interact' : k)
+    if (k === 'e' || k === ' ') this.me.interactDown = false
+    else this.keys.delete(k)
   }
 
   private onBlur = () => {
     this.keys.clear()
-    this.combat.firing = false
+    this.me.firing = false
+    this.me.interactDown = false
   }
-
-  /* ---------------------------------------------------------------- */
-  /* Mouse: apuntar y disparar                                         */
-  /* ---------------------------------------------------------------- */
 
   private onPointerMove = (e: PointerEvent) => {
     const rect = this.renderer.domElement.getBoundingClientRect()
@@ -722,7 +1177,7 @@ export class Game {
     this.raycaster.setFromCamera(ndc, this.camera)
     const hit = new THREE.Vector3()
     if (this.raycaster.ray.intersectPlane(this.aimPlane, hit)) {
-      this.combat.aim.copy(hit)
+      this.me.aim.copy(hit)
       this.aimT = this.clockT
     }
   }
@@ -731,11 +1186,11 @@ export class Game {
     if (e.button !== 0) return
     this.onPointerMove(e)
     if (!this.started || this.paused || this.shopOpen || this.ended) return
-    this.combat.firing = true
+    this.me.firing = true
   }
 
   private onPointerUp = () => {
-    this.combat.firing = false
+    this.me.firing = false
   }
 
   private onContextMenu = (e: Event) => e.preventDefault()
@@ -768,17 +1223,24 @@ export class Game {
       }
     }
     this.reticle.visible = this.combat.enabled && this.clockT - this.aimT < 3
-    this.reticle.position.set(this.combat.aim.x, 0.05, this.combat.aim.z)
+    this.reticle.position.set(this.me.aim.x, 0.05, this.me.aim.z)
   }
 
   private updateHint() {
     const hint = this.ended ? null : this.level.hint(this)
-    this.arrow.visible = !!hint && hint.target !== this.target?.object
+    this.arrow.visible = !!hint && hint.target !== this.me.target?.object
     if (hint) {
       const p = hint.target.position
       this.arrow.position.set(p.x, 3.3 + Math.sin(this.clockT * 5) * 0.2, p.z)
       this.arrow.rotation.y += 0.04
     }
+  }
+
+  /** Teletransporta a un jugador (reaparecer tras ser derribado). */
+  respawn(p: Player) {
+    p.pos.set(0, 0, 3.5)
+    p.netPos.copy(p.pos)
+    p.tp++
   }
 }
 

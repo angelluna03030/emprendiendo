@@ -35,8 +35,13 @@ export class ProjectLevel extends BaseLevel {
   deadline = 150
   duration = null
   maxTime = 330
-  minScore = 50
-  refScore = 100
+  minScore = Math.round(50 * this.f)
+  refScore = Math.round(100 * this.f)
+  /** Con más jugadores el satélite necesita más piezas. */
+  private stages: Stage[] = STAGES.map((st) => ({
+    ...st,
+    needs: Object.fromEntries(Object.entries(st.needs).map(([k, n]) => [k, Math.round((n ?? 0) * this.f)])),
+  }))
   endDelay = 3
 
   private stage = 0
@@ -55,6 +60,39 @@ export class ProjectLevel extends BaseLevel {
   private droneWait = 0
 
   build(g: Game) {
+    // Estado compartido con los invitados
+    g.sync(
+      'proyecto',
+      () => ({ stage: this.stage, delivered: this.delivered, shipped: this.shipped }),
+      (v) => {
+        this.stage = v.stage
+        this.delivered = v.delivered
+        this.shipped = v.shipped
+        this.sat.parts.forEach((part, i) => (part.visible = i < this.stage))
+        this.sat.ghost.visible = this.stage === 0
+      },
+    )
+    g.sync(
+      'dron',
+      () => (this.drone ? { p: this.drone.position.toArray(), c: this.droneJob?.cargo ? this.droneJob.kind : null } : null),
+      (v) => {
+        if (!v) return
+        if (!this.drone) {
+          this.drone = makeDrone()
+          g.scene.add(this.drone)
+        }
+        this.drone.position.fromArray(v.p)
+        const cargo = this.drone.getObjectByName('cargo')
+        if (cargo && (!v.c || cargo.userData.kind !== v.c)) this.drone.remove(cargo)
+        if (v.c && !this.drone.getObjectByName('cargo')) {
+          const mesh = makeItemMesh(v.c)
+          mesh.name = 'cargo'
+          mesh.userData.kind = v.c
+          mesh.position.set(0, -0.6, 0)
+          this.drone.add(mesh)
+        }
+      },
+    )
     const shelves: [BuyKind, number][] = [['aluminio', -9], ['placa', -6.4], ['cpu', -3.8], ['panel_solar', 3.8], ['bateria', 6.4]]
     for (const [kind, x] of shelves) this.shelves[kind] = addShelf(g, kind, x, -6.4).object
     addTable(g, -6.5, 2.8)
@@ -74,25 +112,25 @@ export class ProjectLevel extends BaseLevel {
       size: [2.6, 2.6],
       machine: true,
       hold: (g) => {
-        const s = STAGES[this.stage]
+        const s = this.stages[this.stage]
         if (this.shipped || !s || g.held || s.where !== 'platform' || !this.stageReady()) return null
         return { key: `s${this.stage}`, label: s.work, duration: s.duration, onDone: () => this.completeStage(g, platform) }
       },
       prompt: (g) => {
         if (this.shipped) return null
-        if (this.stage >= STAGES.length && !g.held) return 'Entregar el satélite al cliente 🚀'
+        if (this.stage >= this.stages.length && !g.held) return 'Entregar el satélite al cliente 🚀'
         if (g.held && this.needs(g.held.kind as BuyKind) > 0) return `Instalar ${g.held.label}`
         return null
       },
       info: (g) => {
-        const s = STAGES[this.stage]
+        const s = this.stages[this.stage]
         if (!s) return null
         if (g.held) return `Esta pieza no se necesita en la etapa ${s.name}`
         if (s.where === 'terminal') return 'Ve a la terminal para programar el firmware'
         return `Faltan: ${this.missing().join(', ')}`
       },
       interact: (g) => {
-        if (this.stage >= STAGES.length) {
+        if (this.stage >= this.stages.length) {
           this.ship(g, platform)
           return
         }
@@ -100,7 +138,7 @@ export class ProjectLevel extends BaseLevel {
         const kind = item.kind as BuyKind
         this.delivered[kind] = (this.delivered[kind] ?? 0) + 1
         g.float('✓', '#16a34a', at(platform, 2.4))
-        if (this.stageReady()) g.toast(`Materiales listos: mantén E para "${STAGES[this.stage].work}"`, 'info')
+        if (this.stageReady()) g.toast(`Materiales listos: mantén E para "${this.stages[this.stage].work}"`, 'info')
       },
     })
 
@@ -116,7 +154,7 @@ export class ProjectLevel extends BaseLevel {
       size: [0.9, 1.6],
       machine: true,
       hold: (g) => {
-        const s = STAGES[this.stage]
+        const s = this.stages[this.stage]
         if (!s || s.where !== 'terminal' || g.held) return null
         return { key: 'firmware', label: s.work, duration: s.duration, onDone: () => this.completeStage(g, platform) }
       },
@@ -125,13 +163,13 @@ export class ProjectLevel extends BaseLevel {
   }
 
   private needs(kind: BuyKind) {
-    const s = STAGES[this.stage]
+    const s = this.stages[this.stage]
     if (!s) return 0
     return (s.needs[kind] ?? 0) - (this.delivered[kind] ?? 0)
   }
 
   private missing() {
-    const s = STAGES[this.stage]
+    const s = this.stages[this.stage]
     return Object.entries(s.needs)
       .filter(([k]) => this.needs(k as BuyKind) > 0)
       .map(([k]) => `${CATALOG[k as BuyKind].label} x${this.needs(k as BuyKind)}`)
@@ -142,14 +180,14 @@ export class ProjectLevel extends BaseLevel {
   }
 
   private completeStage(g: Game, platform: THREE.Object3D) {
-    const s = STAGES[this.stage]
+    const s = this.stages[this.stage]
     this.sat.parts[this.stage].visible = true
     if (this.stage === 0) this.sat.ghost.visible = false
     g.reward(10, `Etapa "${s.name}" completada`, 'correct', { at: at(platform, 2.8) })
     this.stage++
     this.delivered = {}
-    const next = STAGES[this.stage]
-    g.toast(next ? `Siguiente etapa: ${next.name}` : '¡Satélite listo! Entrégalo al cliente 🚀', 'info')
+    const next = this.stages[this.stage]
+    g.toast(next ? `Siguiente etapa: ${next.name}` : '¡Satélite listo! Entrégalo al cliente 🚀', 'info', true)
   }
 
   private ship(g: Game, platform: THREE.Object3D) {
@@ -158,7 +196,7 @@ export class ProjectLevel extends BaseLevel {
       g.reward(20, 'Proyecto entregado a tiempo', 'correct', { at: at(platform, 3) })
       g.earn(PAYMENT, at(platform, 3))
     } else {
-      g.toast('Entregado con retraso: el cliente paga menos', 'warn')
+      g.toast('Entregado con retraso: el cliente paga menos', 'warn', true)
       g.earn(LATE_PAYMENT, at(platform, 3))
     }
   }
@@ -172,13 +210,13 @@ export class ProjectLevel extends BaseLevel {
     this.drone = makeDrone()
     this.drone.position.set(0, 3, 2)
     g.scene.add(this.drone)
-    g.toast('🚁 Dron activado: traerá materiales a la plataforma (pagas cada pieza)', 'good')
+    g.toast('🚁 Dron activado: traerá materiales a la plataforma (pagas cada pieza)', 'good', true)
     g.sfx('done')
   }
 
   hint(g: Game): Hint | null {
     if (this.shipped) return null
-    const s = STAGES[this.stage]
+    const s = this.stages[this.stage]
     if (!s) return { target: this.platform, text: '¡Satélite terminado! Presiona E en la plataforma para entregarlo 🚀' }
     if (g.held) {
       if (this.needs(g.held.kind as BuyKind) > 0) return { target: this.platform, text: `Lleva ${g.held.label} a la plataforma y presiona E` }
@@ -196,7 +234,7 @@ export class ProjectLevel extends BaseLevel {
     drone.rotation.y += dt * 3
     if (!this.droneJob) {
       this.droneWait -= dt
-      const s = STAGES[this.stage]
+      const s = this.stages[this.stage]
       const kind = s && !this.shipped ? (Object.keys(s.needs) as BuyKind[]).find((k) => this.needs(k) > 0) : undefined
       if (kind && this.droneWait <= 0) this.droneJob = { kind, phase: 'shelf', cargo: null }
     }
@@ -216,6 +254,7 @@ export class ProjectLevel extends BaseLevel {
       }
       g.stats.materials++
       job.cargo = makeItemMesh(job.kind)
+      job.cargo.name = 'cargo'
       job.cargo.position.set(0, -0.6, 0)
       drone.add(job.cargo)
       job.phase = 'platform'
@@ -224,7 +263,7 @@ export class ProjectLevel extends BaseLevel {
       if (this.needs(job.kind) > 0) {
         this.delivered[job.kind] = (this.delivered[job.kind] ?? 0) + 1
         g.float('🚁 ✓', '#16a34a', at(this.platform, 2.4))
-        if (this.stageReady()) g.toast(`Materiales listos: mantén E para "${STAGES[this.stage].work}"`, 'info')
+        if (this.stageReady()) g.toast(`Materiales listos: mantén E para "${this.stages[this.stage].work}"`, 'info')
       }
       this.droneJob = null
       this.droneWait = 0.5
@@ -232,8 +271,9 @@ export class ProjectLevel extends BaseLevel {
   }
 
   update(dt: number, g: Game) {
-    this.updateDrone(dt, g)
-    const s = STAGES[this.stage]
+    if (g.isHost) this.updateDrone(dt, g)
+    else if (this.drone) this.drone.rotation.y += dt * 3
+    const s = this.stages[this.stage]
     this.tag.set(
       this.shipped ? '🚀 ¡Lanzamiento!' : s ? `Etapa ${this.stage + 1}/5: ${s.name}` : '✅ Listo para entregar',
     )
@@ -255,7 +295,7 @@ export class ProjectLevel extends BaseLevel {
   }
 
   objectives(): Objective[] {
-    const list: Objective[] = STAGES.map((s, i) => ({
+    const list: Objective[] = this.stages.map((s, i) => ({
       text: i === this.stage && Object.keys(s.needs).length ? `${s.name} — falta: ${this.missing().join(', ') || 'ensamblar'}` : s.name,
       done: i < this.stage,
     }))
@@ -267,7 +307,7 @@ export class ProjectLevel extends BaseLevel {
     const left = (this.deadline ?? 0) - g.elapsed
     return [
       { label: 'Etapa', value: `${Math.min(this.stage + 1, 5)} / 5` },
-      { label: 'Avance', value: `${Math.round((this.stage / STAGES.length) * 100)}%`, tone: this.stage === 5 ? 'good' : undefined },
+      { label: 'Avance', value: `${Math.round((this.stage / this.stages.length) * 100)}%`, tone: this.stage === 5 ? 'good' : undefined },
       { label: 'Tiempo restante', value: left > 0 ? fmtTime(left) : 'Atrasado', tone: left < 30 ? 'bad' : undefined },
       { label: 'Materiales usados', value: String(g.stats.materials) },
       { label: 'Desperdicios', value: String(g.stats.waste), tone: g.stats.waste ? 'bad' : undefined },

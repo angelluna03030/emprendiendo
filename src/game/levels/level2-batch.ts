@@ -28,8 +28,10 @@ export class BatchLevel extends BaseLevel {
   deadline = 170
   duration = null
   maxTime = 360
-  minScore = 50
-  refScore = 100
+  minScore = Math.round(50 * this.f)
+  refScore = Math.round(100 * this.f)
+  /** Con más jugadores los lotes son más grandes (múltiplos de 10). */
+  private lots = LOTS.map((l) => ({ ...l, qty: Math.ceil((l.qty * this.f) / 10) * 10 }))
 
   private config: Product = 'celular'
   private changeover = 0
@@ -56,6 +58,29 @@ export class BatchLevel extends BaseLevel {
   private dock!: THREE.Object3D
 
   build(g: Game) {
+    g.sync(
+      'lotes',
+      () => ({
+        config: this.config,
+        changeover: this.changeover,
+        changeovers: this.changeovers,
+        queue: this.queue,
+        output: this.output,
+        produced: this.produced,
+        overproduced: this.overproduced,
+        lot: this.lot,
+        shipped: this.shipped,
+        unitTime: this.unitTime,
+        changeTime: this.changeTime,
+      }),
+      (v) => {
+        const outputChanged = v.output.count !== this.output.count || v.output.product !== this.output.product
+        if (v.lot > this.lot) this.truckT = 2.5
+        Object.assign(this, v)
+        this.output = { ...v.output }
+        if (outputChanged) this.renderTray()
+      },
+    )
     this.shelves.celular = addShelf(g, 'kit_celular', -9, -6.4).object
     this.shelves.tablet = addShelf(g, 'kit_tablet', -6.4, -6.4).object
     this.shelves.laptop = addShelf(g, 'kit_laptop', -3.8, -6.4).object
@@ -86,7 +111,7 @@ export class BatchLevel extends BaseLevel {
         this.config = this.next()
         this.changeover = this.changeTime
         this.changeovers++
-        g.toast(`🔧 Cambio de formato a ${PRODUCT_LABEL[this.config]} (la máquina se detiene ${this.changeTime}s)`, 'info')
+        g.toast(`🔧 Cambio de formato a ${PRODUCT_LABEL[this.config]} (la máquina se detiene ${this.changeTime}s)`, 'info', true)
       },
     })
 
@@ -156,8 +181,8 @@ export class BatchLevel extends BaseLevel {
       name: 'Despacho',
       object: dock,
       size: [1.5, 1.2],
-      prompt: (g) => (g.held?.kind === 'lote' && this.lot < LOTS.length ? 'Despachar lote' : null),
-      info: () => (this.lot < LOTS.length ? 'Trae aquí las cajas de lote' : 'Todos los lotes despachados'),
+      prompt: (g) => (g.held?.kind === 'lote' && this.lot < this.lots.length ? 'Despachar lote' : null),
+      info: () => (this.lot < this.lots.length ? 'Trae aquí las cajas de lote' : 'Todos los lotes despachados'),
       interact: (g) => this.ship(g, dock),
     })
   }
@@ -172,18 +197,18 @@ export class BatchLevel extends BaseLevel {
   buy(id: string, g: Game) {
     if (id === 'turbo' && this.unitTime === UNIT_TIME && g.spend(TURBO_COST)) {
       this.unitTime = UNIT_TIME / 2
-      g.toast('⚡ Ensambladora turbo instalada', 'good')
+      g.toast('⚡ Ensambladora turbo instalada', 'good', true)
       g.sfx('done')
     }
     if (id === 'smed' && this.changeTime === CHANGEOVER && g.spend(SMED_COST)) {
       this.changeTime = 1
-      g.toast('🔧 Cambio rápido instalado: cambiar de producto ahora tarda 1 s', 'good')
+      g.toast('🔧 Cambio rápido instalado: cambiar de producto ahora tarda 1 s', 'good', true)
       g.sfx('done')
     }
   }
 
   hint(g: Game): Hint | null {
-    const target = LOTS[this.lot]
+    const target = this.lots[this.lot]
     if (!target) return null
     const need = PRODUCT_PLURAL[target.product]
     if (g.held?.kind === 'lote') return { target: this.dock, text: 'Lleva la caja del lote al despacho (derecha) y presiona E' }
@@ -206,7 +231,7 @@ export class BatchLevel extends BaseLevel {
 
   private ship(g: Game, dock: THREE.Object3D) {
     const item = g.consumeHeld()
-    const target = LOTS[this.lot]
+    const target = this.lots[this.lot]
     const { product = 'celular', count = 0 } = item.data
     if (product !== target.product) {
       g.reward(-20, `Producto equivocado: este lote es de ${PRODUCT_PLURAL[target.product]}`, 'wrong', { at: at(dock) })
@@ -228,8 +253,8 @@ export class BatchLevel extends BaseLevel {
     this.lot++
     this.shipped = 0
     this.truckT = 2.5
-    const nextLot = LOTS[this.lot]
-    if (nextLot) g.toast(`Siguiente: ${nextLot.qty} ${PRODUCT_PLURAL[nextLot.product]} — cambia el producto en el panel 🎛`, 'info')
+    const nextLot = this.lots[this.lot]
+    if (nextLot) g.toast(`Siguiente: ${nextLot.qty} ${PRODUCT_PLURAL[nextLot.product]} — cambia el producto en el panel 🎛`, 'info', true)
   }
 
   private renderTray() {
@@ -245,29 +270,8 @@ export class BatchLevel extends BaseLevel {
   }
 
   update(dt: number, g: Game) {
-    if (this.changeover > 0) {
-      this.changeover -= dt
-      if (this.changeover <= 0) {
-        g.toast(`✅ Máquina lista para ${PRODUCT_PLURAL[this.config]}`, 'good')
-        g.sfx('done')
-      }
-    }
+    if (g.isHost) this.simulate(dt, g)
     const running = this.queue > 0 && this.changeover <= 0 && !g.isDamaged(this.machineSt)
-    if (running) {
-      this.prodTimer += dt
-      while (this.prodTimer >= this.unitTime && this.queue > 0) {
-        this.prodTimer -= this.unitTime
-        this.queue--
-        this.produced++
-        if (this.output.count > 0 && this.output.product !== this.config) this.output.count = 0
-        this.output.product = this.config
-        this.output.count++
-        this.renderTray()
-      }
-    } else {
-      this.prodTimer = 0
-    }
-
     const m = this.machine
     m.piston.position.y = 1.85 + (running ? Math.abs(Math.sin(g.elapsed * 14)) * -0.25 : 0)
     m.light.color.setHex(this.changeover > 0 ? C.yellow : running ? C.green : 0x94a3b8)
@@ -277,7 +281,7 @@ export class BatchLevel extends BaseLevel {
         ? `🔧 Cambiando formato… ${Math.ceil(this.changeover)}s`
         : `⚙ ${PRODUCT_LABEL[this.config]} · cola: ${this.queue}`,
     )
-    const target = LOTS[this.lot]
+    const target = this.lots[this.lot]
     this.dockTag.set(target ? `Lote ${this.lot + 1}: ${this.shipped}/${target.qty} ${PRODUCT_PLURAL[target.product]}` : '✅ Despachado')
 
     if (this.truckT > 0) {
@@ -287,18 +291,44 @@ export class BatchLevel extends BaseLevel {
     }
   }
 
+  /** Lógica de la máquina (solo el anfitrión). */
+  private simulate(dt: number, g: Game) {
+    if (this.changeover > 0) {
+      this.changeover -= dt
+      if (this.changeover <= 0) {
+        g.toast(`✅ Máquina lista para ${PRODUCT_PLURAL[this.config]}`, 'good', true)
+        g.sfx('done')
+      }
+    }
+    const running = this.queue > 0 && this.changeover <= 0 && !g.isDamaged(this.machineSt)
+    if (!running) {
+      this.prodTimer = 0
+      return
+    }
+    this.prodTimer += dt
+    while (this.prodTimer >= this.unitTime && this.queue > 0) {
+      this.prodTimer -= this.unitTime
+      this.queue--
+      this.produced++
+      if (this.output.count > 0 && this.output.product !== this.config) this.output.count = 0
+      this.output.product = this.config
+      this.output.count++
+      this.renderTray()
+    }
+  }
+
   onEnd(g: Game) {
-    if (this.lot < LOTS.length) return
+    if (this.lot < this.lots.length) return
     if (!g.isLate) g.reward(20, 'Todos los lotes entregados a tiempo', 'correct')
     timeBonus(g, 5, 20)
   }
 
   isComplete() {
-    return this.lot >= LOTS.length
+    return this.lot >= this.lots.length
   }
 
   objectives(): Objective[] {
-    return LOTS.map((l, i) => ({
+    return this.lots.map((l, i) => ({
       text: `Lote ${i + 1}: ${l.qty} ${PRODUCT_PLURAL[l.product]}${i === this.lot ? ` (${this.shipped}/${l.qty})` : ''}`,
       done: i < this.lot,
     }))

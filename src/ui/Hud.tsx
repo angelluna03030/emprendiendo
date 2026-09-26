@@ -87,6 +87,17 @@ export function Hud({ hud, onPause, onShop, onWeapon }: Props) {
             <b>{hud.hp}</b>
           </div>
         )}
+        {hud.team.length > 1 && (
+          <div className="hud-panel team">
+            {hud.team.map((t) => (
+              <div key={t.name + t.color} className={`mate ${t.me ? 'me' : ''}`}>
+                <span className="dot" style={{ background: `#${t.color.toString(16).padStart(6, '0')}` }} />
+                <b>{t.name}</b>
+                <span className="mate-hp">{t.knocked ? '😵' : `❤️ ${t.hp}`}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="hud-panel resources">
           <span title="Personal">👷 {hud.resources.personal}</span>
           <span title="Máquinas">⚙️ {hud.resources.maquinas}</span>

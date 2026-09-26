@@ -7,6 +7,15 @@ import type { BuyKind, Hint, Item, Level, LevelId, Metric, Objective, OrderCard,
 
 /** Implementación por defecto de las partes opcionales de un nivel. */
 export abstract class BaseLevel implements Level {
+  /** Jugadores en el equipo (1 a 3). */
+  readonly team: number
+  /** Factor de producción: +50% por cada jugador extra. */
+  readonly f: number
+  constructor(team = 1) {
+    this.team = team
+    this.f = 1 + 0.5 * (team - 1)
+  }
+
   abstract id: LevelId
   abstract deadline: number | null
   abstract duration: number | null
@@ -96,6 +105,22 @@ export function addShelf(g: Game, kind: BuyKind, x: number, z: number, tint?: nu
 export function addTable(g: Game, x: number, z: number): Station {
   const object = place(makeTable(), x, z)
   let item: Item | null = null
+  // Invitados: la mesa muestra lo mismo que la del anfitrión.
+  g.sync(
+    `mesa:${x}:${z}`,
+    () => (item ? { k: item.kind, d: item.data } : null),
+    (v) => {
+      if (item) {
+        object.remove(item.mesh)
+        item = null
+      }
+      if (v) {
+        item = makeItem(v.k, v.d)
+        item.mesh.position.set(0, 0.9, 0)
+        object.add(item.mesh)
+      }
+    },
+  )
   return g.addStation({
     name: 'Mesa',
     object,
