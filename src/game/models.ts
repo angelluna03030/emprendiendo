@@ -498,14 +498,101 @@ export function makeBoss(): WorkerRig {
 
 export function makeGun(kind: string): THREE.Group {
   const g = new THREE.Group()
-  if (kind === 'subfusil') {
-    g.add(box(0.12, 0.14, 0.62, C.darker, [0, 0, 0.25]), box(0.08, 0.26, 0.1, C.dark, [0, -0.15, 0.1]), box(0.06, 0.2, 0.08, C.orange, [0, -0.12, 0.32]))
-  } else if (kind === 'escopeta') {
-    g.add(box(0.12, 0.13, 0.8, 0x78350f, [0, 0, 0.3]), cyl(0.05, 0.05, 0.5, C.darker, [0.03, 0.05, 0.55], 6).rotateX(Math.PI / 2), cyl(0.05, 0.05, 0.5, C.darker, [-0.03, 0.05, 0.55], 6).rotateX(Math.PI / 2))
-  } else {
-    g.add(box(0.1, 0.13, 0.36, C.dark, [0, 0, 0.14]), box(0.08, 0.2, 0.09, C.darker, [0, -0.12, 0.02]))
+  const barrel = (r: number, len: number, color: number, x: number, y: number, z: number, material?: THREE.Material) =>
+    cyl(r, r, len, color, [x, y, z], 8, material).rotateX(Math.PI / 2)
+  switch (kind) {
+    case 'subfusil':
+      g.add(box(0.12, 0.14, 0.62, C.darker, [0, 0, 0.25]), box(0.08, 0.26, 0.1, C.dark, [0, -0.15, 0.1]), box(0.06, 0.2, 0.08, C.orange, [0, -0.12, 0.32]))
+      break
+    case 'escopeta':
+      g.add(box(0.12, 0.13, 0.8, 0x78350f, [0, 0, 0.3]), barrel(0.05, 0.5, C.darker, 0.03, 0.05, 0.55), barrel(0.05, 0.5, C.darker, -0.03, 0.05, 0.55))
+      break
+    case 'rifle':
+      g.add(box(0.1, 0.14, 0.9, 0xe2e8f0, [0, 0, 0.35]), barrel(0.04, 0.5, 0, 0, 0.02, 0.8, mat(0x22d3ee, 0x06b6d4)), box(0.06, 0.1, 0.25, 0x22d3ee, [0, 0.1, 0.25], mat(0x22d3ee, 0x0891b2)))
+      break
+    case 'lanzallamas':
+      g.add(cyl(0.12, 0.12, 0.45, C.red, [0, -0.05, 0.05], 10), barrel(0.05, 0.55, C.dark, 0, 0.05, 0.45), ball(0.07, 0, [0, 0.05, 0.74], 6, mat(C.orange, 0xf97316)))
+      break
+    case 'bazuca':
+      g.add(barrel(0.12, 1.0, 0x4d7c0f, 0, 0.08, 0.3), barrel(0.14, 0.12, C.darker, 0, 0.08, 0.82), box(0.08, 0.22, 0.1, C.dark, [0, -0.1, 0.15]))
+      break
+    case 'minigun': {
+      const spin = new THREE.Group()
+      spin.name = 'spin'
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2
+        spin.add(barrel(0.03, 0.7, C.darker, Math.cos(a) * 0.08, Math.sin(a) * 0.08, 0))
+      }
+      spin.position.set(0, 0.02, 0.55)
+      g.add(box(0.2, 0.22, 0.4, C.yellow, [0, 0, 0.05]), spin)
+      break
+    }
+    default:
+      g.add(box(0.1, 0.13, 0.36, C.dark, [0, 0, 0.14]), box(0.08, 0.2, 0.09, C.darker, [0, -0.12, 0.02]))
   }
   return g
+}
+
+/** Zombi volador: pequeño, con alas de murciélago. */
+export function makeFlyer(): WorkerRig & { wings: THREE.Group[] } {
+  const rig = makeWorker(0x4c1d95, null, 0x1e1b4b, 0x86c77a)
+  rig.root.scale.setScalar(0.8)
+  rig.armL.rotation.x = rig.armR.rotation.x = -1.45
+  const eye = mat(0xfacc15, 0xfacc15)
+  rig.body.add(ball(0.05, 0, [-0.1, 1.3, 0.26], 6, eye), ball(0.05, 0, [0.1, 1.3, 0.26], 6, eye))
+  const wingMat = mat(0x6d28d9, 0x2e1065)
+  const wing = (side: number) => {
+    const w = new THREE.Group()
+    w.position.set(side * 0.28, 0.95, -0.15)
+    const m1 = box(0.9, 0.04, 0.5, 0, [side * 0.45, 0, 0], wingMat)
+    const m2 = box(0.5, 0.04, 0.35, 0, [side * 0.95, -0.05, -0.1], wingMat)
+    w.add(m1, m2)
+    rig.body.add(w)
+    return w
+  }
+  return { ...rig, wings: [wing(-1), wing(1)] }
+}
+
+/** Zombi corredor: flaco y rápido. */
+export function makeRunner(): WorkerRig {
+  const rig = makeWorker(0xea580c, null, 0x44403c, 0x9bd08a)
+  rig.root.scale.set(0.85, 1.05, 0.85)
+  rig.armL.rotation.x = rig.armR.rotation.x = -1.2
+  const eye = mat(0xef4444, 0xef4444)
+  rig.body.add(ball(0.05, 0, [-0.1, 1.3, 0.26], 6, eye), ball(0.05, 0, [0.1, 1.3, 0.26], 6, eye))
+  return rig
+}
+
+/** Zombi explosivo: inflado y brillante. */
+export function makeExploder(): WorkerRig & { glow: THREE.MeshStandardMaterial } {
+  const rig = makeWorker(0x7f1d1d, null, 0x44403c, 0x86c77a)
+  rig.armL.rotation.x = rig.armR.rotation.x = -1.45
+  const glow = ownMat(0xf97316, 0xea580c)
+  rig.body.add(ball(0.42, 0, [0, 0.8, 0.05], 10, glow))
+  for (const [x, y] of [[-0.2, 1.0], [0.25, 0.65], [0.1, 1.05]]) rig.body.add(ball(0.08, 0, [x, y, 0.4], 6, mat(C.yellow, C.yellow)))
+  return { ...rig, glow }
+}
+
+/** Casco de astronauta para los zombis del espacio. */
+export function makeHelmet(): THREE.Mesh {
+  const m = new THREE.Mesh(
+    new THREE.SphereGeometry(0.4, 14, 10),
+    new THREE.MeshStandardMaterial({ color: 0xbae6fd, transparent: true, opacity: 0.35, roughness: 0.1, metalness: 0.3 }),
+  )
+  m.position.set(0, 1.28, 0)
+  return m
+}
+
+export function makeMine(): THREE.Group {
+  return grp(cyl(0.28, 0.32, 0.1, C.dark, [0, 0.05, 0], 10), ball(0.07, 0, [0, 0.13, 0], 6, mat(C.red, C.red)))
+}
+
+export function makeTesla(): { group: THREE.Group; orb: THREE.MeshStandardMaterial } {
+  const orb = ownMat(0x93c5fd, 0x3b82f6)
+  const g = grp(cyl(0.45, 0.55, 0.25, C.dark, [0, 0.12, 0], 8), cyl(0.12, 0.18, 1.4, C.steel, [0, 0.9, 0], 8))
+  for (const y of [0.6, 0.9, 1.2]) g.add(cyl(0.3, 0.3, 0.06, 0xb45309, [0, y, 0], 12))
+  g.add(ball(0.26, 0, [0, 1.8, 0], 12, orb))
+  return { group: g, orb }
 }
 
 export function makeTurret(): { group: THREE.Group; head: THREE.Group } {

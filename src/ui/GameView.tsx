@@ -19,7 +19,8 @@ interface Props {
 
 const CATEGORY: Record<ShopCategory, string> = {
   arma: '🔫 Armas y munición',
-  defensa: '🛡️ Defensa',
+  mejora: '⭐ Mejoras del equipo',
+  defensa: '🛡️ Defensa y robots de combate',
   fabrica: '🏭 Robots y máquinas de la fábrica',
 }
 
@@ -117,10 +118,15 @@ export function GameView({ levelId, money, zombies, session, players, musicOn, o
               <span><kbd>E</kbd> usar · mantener para trabajar</span>
               <span><kbd>B</kbd> tienda</span>
               {zombies && <span>🖱️ apuntar · clic disparar · mantener = ráfaga</span>}
-              {zombies && <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> armas</span>}
+              {zombies && <span><kbd>1</kbd>…<kbd>7</kbd> armas</span>}
               <span><kbd>Esc</kbd> pausa</span>
             </div>
-            {zombies && <p className="intro-zombie">🧟 ¡Cuidado! A los 20 s llegan zombis: te atacan, dañan máquinas y roban materiales.</p>}
+            {zombies && (
+              <p className="intro-zombie">
+                🧟 ¡Cuidado! A los 20 s llegan zombis: normales, 🏃 corredores, 🦇 voladores y 💣 explosivos. Te atacan, dañan
+                máquinas y roban materiales. Compra armas y mejoras en la tienda (B).
+              </p>
+            )}
             <div className="row">
               <button className="btn ghost" onClick={onExit}>{guest ? 'Salir de la sala' : '← Volver'}</button>
               {guest ? (

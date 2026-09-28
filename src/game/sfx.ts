@@ -1,6 +1,6 @@
 /** Efectos de sonido sintetizados con WebAudio (sin archivos externos). */
 
-export type SfxName = 'pick' | 'drop' | 'good' | 'bad' | 'error' | 'done' | 'cash' | 'alarm' | 'win' | 'click' | 'shot' | 'shotgun' | 'hit' | 'hurt' | 'groan' | 'kill'
+export type SfxName = 'pick' | 'drop' | 'good' | 'bad' | 'error' | 'done' | 'cash' | 'alarm' | 'win' | 'click' | 'shot' | 'shotgun' | 'hit' | 'hurt' | 'groan' | 'kill' | 'boom' | 'zap' | 'flame' | 'laser' | 'rocket'
 
 // [frecuencia Hz, duración s, forma de onda, retraso s]
 type Note = [number, number, OscillatorType, number]
@@ -22,6 +22,11 @@ const SOUNDS: Record<SfxName, Note[]> = {
   hurt: [[220, 0.1, 'sawtooth', 0], [150, 0.14, 'sawtooth', 0.06]],
   groan: [[95, 0.35, 'sawtooth', 0], [80, 0.35, 'sawtooth', 0.2]],
   kill: [[300, 0.06, 'square', 0], [150, 0.12, 'square', 0.05]],
+  boom: [[120, 0.25, 'sawtooth', 0], [60, 0.4, 'sawtooth', 0.05], [40, 0.4, 'square', 0.1]],
+  zap: [[1400, 0.05, 'sawtooth', 0], [900, 0.08, 'sawtooth', 0.03]],
+  flame: [[140, 0.06, 'sawtooth', 0]],
+  laser: [[1800, 0.06, 'sine', 0], [1200, 0.08, 'sine', 0.03]],
+  rocket: [[200, 0.2, 'sawtooth', 0], [320, 0.15, 'triangle', 0.05]],
 }
 
 let ctx: AudioContext | null = null
@@ -31,8 +36,14 @@ export function setMuted(value: boolean) {
   muted = value
 }
 
+const lastPlayed = new Map<SfxName, number>()
+
 export function play(name: SfxName) {
   if (muted) return
+  // Evita saturar el audio cuando un sonido se repite muy rápido (minigun, lanzallamas…)
+  const now = performance.now()
+  if (now - (lastPlayed.get(name) ?? 0) < 45) return
+  lastPlayed.set(name, now)
   try {
     ctx ??= new AudioContext()
     if (ctx.state === 'suspended') void ctx.resume()

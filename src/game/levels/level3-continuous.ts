@@ -301,7 +301,7 @@ export class ContinuousLevel extends BaseLevel {
       this.robotTimer -= dt
       this.robot.joint.rotation.y = Math.sin(g.elapsed * 6) * 0.9
       if (this.robotTimer < 0) {
-        if (g.spend(25, at(this.hopperRig.group, 3))) {
+        if (g.spend(g.materialCost(25), at(this.hopperRig.group, 3))) {
           g.stats.materials++
           this.refill(g, this.hopperRig.group)
           g.toast('🤖 Robot abasteció la tolva', 'info', true)

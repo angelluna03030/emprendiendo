@@ -43,6 +43,7 @@ export class ProjectLevel extends BaseLevel {
     needs: Object.fromEntries(Object.entries(st.needs).map(([k, n]) => [k, Math.round((n ?? 0) * this.f)])),
   }))
   endDelay = 3
+  theme = 'space' as const
 
   private stage = 0
   private delivered: Partial<Record<BuyKind, number>> = {}
@@ -247,7 +248,7 @@ export class ProjectLevel extends BaseLevel {
     drone.position.y = 3 + Math.sin(g.elapsed * 4) * 0.1
     if (!job || dist > 0.2) return
     if (job.phase === 'shelf') {
-      if (!g.spend(CATALOG[job.kind].cost, drone.position.clone())) {
+      if (!g.spend(g.materialCost(CATALOG[job.kind].cost), drone.position.clone())) {
         this.droneJob = null
         this.droneWait = 4
         return

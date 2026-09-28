@@ -109,11 +109,27 @@ export function Instructions({ onBack }: { onBack: () => void }) {
             <li><b>Dañar una máquina:</b> la máquina se detiene y echa humo. Mantén <kbd>E</kbd> junto a ella para repararla.</li>
             <li><b>Robar materiales:</b> se lleva piezas de una estantería o mesa. ¡Dispárale antes de que escape o será desperdicio!</li>
           </ul>
+          <div className="resource-grid">
+            <div><span>🧟</span><b>Normal</b><small>Lento. Ataca, daña máquinas o roba.</small></div>
+            <div><span>🏃</span><b>Corredor</b><small>Muy rápido pero con poca vida.</small></div>
+            <div><span>🦇</span><b>Volador</b><small>Vuela por encima de las máquinas directo hacia ti.</small></div>
+            <div><span>💣</span><b>Explosivo</b><small>Enciende la mecha y revienta. ¡Aléjate! Si lo matas, explota contra los zombis cercanos.</small></div>
+            <div><span>💪</span><b>Grandote</b><small>Mucha vida y golpea fuerte (desde la oleada 3).</small></div>
+            <div><span>👑</span><b>Jefe final</b><small>Nivel 4: gigante que llama a más zombis.</small></div>
+          </div>
           <div className="keys big">
             <span>🖱️ Mueve el mouse para <b>apuntar</b></span>
             <span><b>Clic</b>: un disparo</span>
             <span><b>Mantener clic</b>: ráfaga continua</span>
-            <span><kbd>1</kbd> Pistola (∞) · <kbd>2</kbd> Subfusil · <kbd>3</kbd> Escopeta</span>
+          </div>
+          <div className="score-table">
+            <span><kbd>1</kbd></span><span>🔫 Pistola — gratis y con balas infinitas</span>
+            <span><kbd>2</kbd></span><span>🔫 Subfusil — ráfaga rapidísima</span>
+            <span><kbd>3</kbd></span><span>💥 Escopeta — 6 perdigones, ideal de cerca</span>
+            <span><kbd>4</kbd></span><span>⚡ Rifle láser — atraviesa hasta 4 zombis</span>
+            <span><kbd>5</kbd></span><span>🔥 Lanzallamas — corto alcance, quema a varios</span>
+            <span><kbd>6</kbd></span><span>🚀 Bazuca — cohete que explota en área</span>
+            <span><kbd>7</kbd></span><span>🌀 Minigun — la más rápida de todas</span>
           </div>
           <p>Cada zombi derrotado te da dinero. Si prefieres jugar solo la parte de producción, apaga el modo zombis en el menú.</p>
         </section>
@@ -121,10 +137,11 @@ export function Instructions({ onBack }: { onBack: () => void }) {
         <section className="card">
           <h3>🛒 Tienda (tecla B)</h3>
           <div className="resource-grid">
-            <div><span>🔫</span><b>Armas</b><small>Subfusil, escopeta y su munición.</small></div>
-            <div><span>🗼</span><b>Torreta robot</b><small>Se instala donde estás y dispara sola.</small></div>
-            <div><span>🛡️</span><b>Robot guardián</b><small>Te sigue y te protege.</small></div>
+            <div><span>🔫</span><b>Armas</b><small>6 armas extra y su munición.</small></div>
+            <div><span>⭐</span><b>Mejoras</b><small>Chaleco, botas turbo, nanobots, balas mejoradas, gatillo rápido, imán de dinero.</small></div>
+            <div><span>🗼</span><b>Defensas</b><small>Torretas, torre Tesla, minas, robot guardián y dron de combate.</small></div>
             <div><span>🔧</span><b>Robot reparador</b><small>Arregla solo las máquinas dañadas.</small></div>
+            <div><span>📦</span><b>Negocio</b><small>Proveedor mayorista (-20% materiales), contrato premium (+20% ventas), seguro antirrobo.</small></div>
             <div><span>🏭</span><b>Máquinas del nivel</b><small>Dron de carga, ensambladora turbo, cambio rápido, robot abastecedor, brazo de ensamble…</small></div>
           </div>
           <p>El juego se pausa mientras compras. Lo que compras dura el nivel actual: piensa si la inversión vale la pena.</p>

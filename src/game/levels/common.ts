@@ -24,6 +24,7 @@ export abstract class BaseLevel implements Level {
   abstract refScore: number
   endDelay = 1.6
   zombieScale = 1
+  theme: 'factory' | 'space' = 'factory'
   abstract build(g: Game): void
   abstract update(dt: number, g: Game): void
   abstract objectives(g: Game): Objective[]
@@ -86,16 +87,16 @@ export function addShelf(g: Game, kind: BuyKind, x: number, z: number, tint?: nu
     name: info.label,
     object,
     size: [1.8, 0.9],
-    prompt: (g) => (g.held ? null : `Comprar ${info.label} ($${info.cost})`),
+    prompt: (g) => (g.held ? null : `Comprar ${info.label} ($${g.materialCost(info.cost)})`),
     info: (g) => (g.held ? 'Tienes las manos ocupadas' : null),
     interact: (g) => {
-      if (!g.spend(info.cost, at(object, 2.6))) return
+      if (!g.spend(g.materialCost(info.cost), at(object, 2.6))) return
       g.stats.materials++
       g.take(makeItem(kind))
     },
     // Un zombi se lleva materia prima ya pagada del inventario.
     steal: (g) => {
-      g.loseMoney(info.cost)
+      if (!g.combat.insured) g.loseMoney(g.materialCost(info.cost))
       return info.label
     },
   })

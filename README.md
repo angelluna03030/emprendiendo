@@ -22,15 +22,20 @@ En desarrollo puedes abrir un nivel directo con `?nivel=1` … `?nivel=4` (ese m
 | Mantener `E` | Ensamblar, reparar, programar |
 | `B` | Tienda (robots, máquinas, armas) |
 | Mouse | Apuntar · clic = disparo · mantener = ráfaga |
-| `1`, `2`, `3` | Pistola, subfusil, escopeta |
+| `1` … `7` | Pistola, subfusil, escopeta, rifle láser, lanzallamas, bazuca, minigun |
 | `Esc` | Pausa |
 
 ## Modo zombis
 
-En todos los niveles llegan oleadas de zombis que te atacan, dañan máquinas (se reparan manteniendo `E`)
-y roban materiales. Se puede apagar desde el menú. En la tienda hay torretas, robot guardián, robot reparador,
-botiquín, armas y máquinas propias de cada nivel (dron de carga, ensambladora turbo, cambio rápido SMED,
-robot abastecedor, máquinas de alta velocidad, brazo de ensamble automático).
+En todos los niveles llegan oleadas de zombis (normales, corredores, voladores, explosivos y grandotes; jefes
+finales en el nivel 4) que te atacan, dañan máquinas (se reparan manteniendo `E`) y roban materiales. Se puede
+apagar desde el menú. El nivel 1 ocurre en una estación espacial.
+
+La tienda (`B`) tiene 6 armas extra, mejoras del equipo (chaleco, botas turbo, nanobots, balas mejoradas,
+gatillo rápido, imán de dinero), defensas (torretas, torre Tesla, minas, robot guardián, dron de combate,
+botiquín), mejoras de negocio (proveedor mayorista, contrato premium, seguro antirrobo, robot reparador) y
+máquinas propias de cada nivel (dron de carga, ensambladora turbo, cambio rápido SMED, robot abastecedor,
+máquinas de alta velocidad, brazo de ensamble automático).
 
 La música de fondo es `src/assets/sonido.mp3` y se puede apagar desde el menú o la pausa.
 

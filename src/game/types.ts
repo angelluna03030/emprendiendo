@@ -111,7 +111,7 @@ export interface Metric {
   tone?: 'good' | 'bad' | 'warn'
 }
 
-export type ShopCategory = 'arma' | 'defensa' | 'fabrica'
+export type ShopCategory = 'arma' | 'mejora' | 'defensa' | 'fabrica'
 
 export interface Upgrade {
   id: string
@@ -166,6 +166,8 @@ export interface Level {
   repairTargets(g: Game): RepairTarget[]
   /** Multiplicador de zombis por oleada (nivel 4 = x3). */
   zombieScale: number
+  /** Escenario: fábrica o estación espacial. */
+  theme: 'factory' | 'space'
   isComplete(g: Game): boolean
   onEnd(g: Game): void
 }

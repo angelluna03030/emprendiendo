@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import type { NetMsg, PlayerInfo, Session } from '../net/session'
 import { Combat, type WeaponId } from './combat'
-import { buildFactory } from './env'
+import { buildEnvironment, type EnvUpdate } from './env'
 import { makeItem } from './items'
 import { createLevel } from './levels'
 import { ball, clearMaterialCache, makeHintArrow, makeWorker, type WorkerRig } from './models'
@@ -67,7 +67,9 @@ type Fx =
   | { t: 'f'; s: string; c: string; p: number[] }
   | { t: 't'; s: string; tone: Toast['tone']; to: string | null }
   | { t: 's'; n: SfxName }
-  | { t: 'b'; p: number[]; v: number[] }
+  | { t: 'b'; p: number[]; v: number[]; k: string }
+  | { t: 'x'; p: number[]; r: number }
+  | { t: 'z'; a: number[]; b: number[] }
 
 interface Snap {
   st: boolean
@@ -143,6 +145,9 @@ export class Game {
   private readonly reticle: THREE.Mesh
   private readonly syncs = new Map<string, { get: () => unknown; set: (v: never) => void; last: string }>()
   private fx: Fx[] = []
+  private readonly envUpdate: EnvUpdate
+  private readonly booms: { mesh: THREE.Mesh; life: number; r: number }[] = []
+  private readonly bolts: { line: THREE.Line; life: number }[] = []
   private aimT = -10
   private shopOpen = false
   private started = false
@@ -173,25 +178,7 @@ export class Game {
     this.renderer.toneMappingExposure = 1.05
     container.appendChild(this.renderer.domElement)
 
-    this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 200)
-    this.scene.background = new THREE.Color(0xbfe3ff)
-    this.scene.fog = new THREE.Fog(0xbfe3ff, 45, 90)
-
-    const hemi = new THREE.HemisphereLight(0xffffff, 0xb6c3d1, 1.6)
-    const sun = new THREE.DirectionalLight(0xfff4e0, 2.2)
-    sun.position.set(-8, 18, 10)
-    sun.castShadow = true
-    sun.shadow.mapSize.set(2048, 2048)
-    const s = sun.shadow.camera
-    s.left = -16
-    s.right = 16
-    s.top = 14
-    s.bottom = -14
-    s.far = 60
-    sun.shadow.bias = -0.0005
-    this.scene.add(hemi, sun)
-
-    buildFactory(this.scene)
+    this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 300)
 
     // Jugadores
     const infos = opts.players?.length ? opts.players : [{ id: 'solo', name: 'Tú', color: 0x3b82f6 }]
@@ -200,6 +187,8 @@ export class Game {
     this.me = this.players.find((p) => p.id === myId) ?? this.players[0]
     this.actor = this.me
     this.teamSize = this.players.length
+    this.level = createLevel(levelId, this.teamSize)
+    this.envUpdate = buildEnvironment(this.scene, this.level.theme)
 
     this.ring = new THREE.Mesh(
       new THREE.RingGeometry(0.85, 1.0, 40),
@@ -224,7 +213,6 @@ export class Game {
     this.combat = new Combat(this, opts.zombies)
     for (const p of this.players) this.combat.equip(p, 'pistola')
 
-    this.level = createLevel(levelId, this.teamSize)
     this.level.build(this)
 
     this.session?.setGameHandler((from, msg) => this.onNet(from, msg))
@@ -364,7 +352,13 @@ export class Game {
     }
   }
 
+  /** Precio de materia prima (el proveedor mayorista da 20% de descuento). */
+  materialCost(cost: number) {
+    return Math.round(cost * this.combat.materialFactor)
+  }
+
   earn(amount: number, at?: THREE.Vector3, silent = false) {
+    amount = Math.round(amount * this.combat.incomeFactor)
     this.money += amount
     this.stats.earned += amount
     this.float(`+$${amount}`, '#ca8a04', (at ?? this.playerPos.clone().setY(2.2)).clone().add(new THREE.Vector3(0.6, 0.4, 0)))
@@ -428,8 +422,68 @@ export class Game {
   }
 
   /** Disparo visual para los invitados (el daño solo lo calcula el anfitrión). */
-  netBullet(origin: THREE.Vector3, vel: THREE.Vector3) {
-    if (this.role === 'host') this.fx.push({ t: 'b', p: origin.toArray(), v: [vel.x, vel.z] })
+  netBullet(origin: THREE.Vector3, vel: THREE.Vector3, kind: string) {
+    if (this.role === 'host') this.fx.push({ t: 'b', p: origin.toArray(), v: [vel.x, vel.z], k: kind })
+  }
+
+  /** Explosión visual (bazuca, minas, zombis explosivos). */
+  boom(at: THREE.Vector3, radius: number) {
+    if (this.role === 'host') this.fx.push({ t: 'x', p: at.toArray(), r: radius })
+    this.showBoom(at, radius)
+  }
+
+  private showBoom(at: THREE.Vector3, radius: number) {
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 16, 12),
+      new THREE.MeshBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.85, depthWrite: false }),
+    )
+    mesh.position.copy(at).setY(0.8)
+    this.scene.add(mesh)
+    this.booms.push({ mesh, life: 0.45, r: radius })
+    play('boom')
+  }
+
+  /** Rayo de la torre Tesla. */
+  zap(a: THREE.Vector3, b: THREE.Vector3) {
+    if (this.role === 'host') this.fx.push({ t: 'z', a: a.toArray(), b: b.toArray() })
+    this.showZap(a, b)
+  }
+
+  private showZap(a: THREE.Vector3, b: THREE.Vector3) {
+    const pts: THREE.Vector3[] = []
+    for (let i = 0; i <= 6; i++) {
+      const p = a.clone().lerp(b, i / 6)
+      if (i > 0 && i < 6) p.add(new THREE.Vector3((Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.5))
+      pts.push(p)
+    }
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x93c5fd }))
+    this.scene.add(line)
+    this.bolts.push({ line, life: 0.15 })
+  }
+
+  private updateEffects(dt: number) {
+    for (let i = this.booms.length - 1; i >= 0; i--) {
+      const b = this.booms[i]
+      b.life -= dt
+      const k = 1 - b.life / 0.45
+      b.mesh.scale.setScalar(0.3 + k * b.r)
+      ;(b.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.85 * (1 - k))
+      ;(b.mesh.material as THREE.MeshBasicMaterial).color.setHex(k < 0.4 ? 0xfde047 : 0xf97316)
+      if (b.life <= 0) {
+        this.scene.remove(b.mesh)
+        disposeObject(b.mesh)
+        this.booms.splice(i, 1)
+      }
+    }
+    for (let i = this.bolts.length - 1; i >= 0; i--) {
+      const b = this.bolts[i]
+      b.life -= dt
+      if (b.life <= 0) {
+        this.scene.remove(b.line)
+        disposeObject(b.line)
+        this.bolts.splice(i, 1)
+      }
+    }
   }
 
   get isLate() {
@@ -567,6 +621,8 @@ export class Game {
     else if (this.started && !frozen) this.tick(dt)
 
     this.animatePlayers(dt)
+    this.envUpdate(dt, this.clockT)
+    this.updateEffects(dt)
     this.updateCamera(dt)
     this.updateFloats(dt)
     this.renderer.render(this.scene, this.camera)
@@ -680,7 +736,7 @@ export class Game {
     const aiming = this.combat.enabled && p.firing && p.knocked <= 0
     if (p.moving) {
       dir.normalize()
-      p.pos.addScaledVector(dir, SPEED * dt)
+      p.pos.addScaledVector(dir, SPEED * this.combat.speedFactor * dt)
     }
     if (aiming || p.moving) {
       const d = aiming ? this.combat.aimDir(p) : dir
@@ -1022,7 +1078,9 @@ export class Game {
       else if (f.t === 't') {
         if (f.to === null || f.to === this.me.id) this.showToast(f.s, f.tone)
       } else if (f.t === 's') play(f.n)
-      else if (f.t === 'b') this.combat.visualBullet(new THREE.Vector3().fromArray(f.p), new THREE.Vector3(f.v[0], 0, f.v[1]))
+      else if (f.t === 'b') this.combat.visualBullet(new THREE.Vector3().fromArray(f.p), new THREE.Vector3(f.v[0], 0, f.v[1]), f.k)
+      else if (f.t === 'x') this.showBoom(new THREE.Vector3().fromArray(f.p), f.r)
+      else if (f.t === 'z') this.showZap(new THREE.Vector3().fromArray(f.a), new THREE.Vector3().fromArray(f.b))
     }
   }
 

@@ -36,10 +36,10 @@ export const LEVELS: LevelInfo[] = [
     id: 1,
     emoji: '🛰️',
     type: 'Producción por proyecto',
-    title: 'Satélite a la medida',
+    title: 'Satélite en la estación orbital',
     color: '#f59e0b',
     concept:
-      'Se fabrica UN solo producto grande y único, en un lugar fijo, siguiendo etapas en orden y con fecha límite. Los materiales se llevan hasta el producto.',
+      'En una estación espacial se fabrica UN solo producto grande y único (un satélite), en un lugar fijo, siguiendo etapas en orden y con fecha límite. Los materiales se llevan hasta el producto.',
     flow: ['🗄️ Estanterías', '🛰️ Plataforma', '💻 Terminal', '🛰️ Plataforma', '🚀 Cliente'],
     steps: [
       'Compra en las estanterías SOLO las piezas de la etapa actual (mira la lista de la izquierda).',
