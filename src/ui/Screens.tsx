@@ -90,6 +90,7 @@ export function Instructions({ onBack }: { onBack: () => void }) {
             <span><kbd>E</kbd> o <kbd>Espacio</kbd>: tomar, dejar, usar</span>
             <span>Mantener <kbd>E</kbd>: ensamblar o reparar</span>
             <span><kbd>B</kbd>: tienda (robots, máquinas y armas)</span>
+            <span><kbd>V</kbd>: cambiar la vista (desde arriba, 3ª persona o 1ª persona)</span>
             <span><kbd>Esc</kbd>: pausa</span>
           </div>
           <p>Solo puedes llevar un objeto a la vez. Usa las mesas para dejar cosas y la caneca para desechar.</p>

@@ -76,6 +76,7 @@ export function GameView({ levelId, money, zombies, session, players, musicOn, o
           onPause={() => game()?.setPaused(true)}
           onShop={() => game()?.setShop(true)}
           onWeapon={(id) => game()?.selectWeapon(id)}
+          onView={() => game()?.cycleView()}
         />
       )}
 
@@ -117,6 +118,7 @@ export function GameView({ levelId, money, zombies, session, players, musicOn, o
               <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> moverse</span>
               <span><kbd>E</kbd> usar · mantener para trabajar</span>
               <span><kbd>B</kbd> tienda</span>
+              <span><kbd>V</kbd> vista: arriba · 3ª persona · 1ª persona</span>
               {zombies && <span>🖱️ apuntar · clic disparar · mantener = ráfaga</span>}
               {zombies && <span><kbd>1</kbd>…<kbd>7</kbd> armas</span>}
               <span><kbd>Esc</kbd> pausa</span>

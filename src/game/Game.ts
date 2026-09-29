@@ -4,7 +4,7 @@ import { Combat, type WeaponId } from './combat'
 import { buildEnvironment, type EnvUpdate } from './env'
 import { makeItem } from './items'
 import { createLevel } from './levels'
-import { ball, clearMaterialCache, makeHintArrow, makeWorker, type WorkerRig } from './models'
+import { ball, clearMaterialCache, makeGun, makeHintArrow, makeWorker, type WorkerRig } from './models'
 import { play, type SfxName } from './sfx'
 import { ProgressSprite, TextSprite } from './sprites'
 import type { HoldAction, HudState, Item, ItemData, ItemKind, Level, LevelId, LevelResult, LevelStats, Prompt, StatKey, Station, Toast } from './types'
@@ -30,6 +30,19 @@ export interface GameOptions {
 }
 
 export type Role = 'solo' | 'host' | 'client'
+
+export type View = 'top' | 'third' | 'first'
+const VIEWS: View[] = ['top', 'third', 'first']
+const VIEW_KEY = 'production-game:view'
+
+function loadView(): View {
+  try {
+    const v = localStorage.getItem(VIEW_KEY) as View | null
+    return v && VIEWS.includes(v) ? v : 'top'
+  } catch {
+    return 'top'
+  }
+}
 
 /** Un jugador de la fábrica (local o remoto). */
 export interface Player {
@@ -149,6 +162,13 @@ export class Game {
   private readonly booms: { mesh: THREE.Mesh; life: number; r: number }[] = []
   private readonly bolts: { line: THREE.Line; life: number }[] = []
   private aimT = -10
+  /** Cámara: vista actual, giro horizontal (yaw) y vertical (pitch). */
+  private view: View = loadView()
+  private yaw = Math.PI
+  private pitch = 0.3
+  private locked = false
+  private viewModel = new THREE.Group()
+  private viewGunKind = ''
   private shopOpen = false
   private started = false
   private paused = false
@@ -178,7 +198,11 @@ export class Game {
     this.renderer.toneMappingExposure = 1.05
     container.appendChild(this.renderer.domElement)
 
-    this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 300)
+    this.camera = new THREE.PerspectiveCamera(40, 1, 0.05, 300)
+    // Arma en primera persona: va pegada a la cámara
+    this.camera.add(this.viewModel)
+    this.viewModel.position.set(0.32, -0.32, -0.7)
+    this.viewModel.rotation.y = Math.PI
 
     // Jugadores
     const infos = opts.players?.length ? opts.players : [{ id: 'solo', name: 'Tú', color: 0x3b82f6 }]
@@ -229,6 +253,9 @@ export class Game {
     canvas.addEventListener('pointerdown', this.onPointerDown)
     window.addEventListener('pointerup', this.onPointerUp)
     canvas.addEventListener('contextmenu', this.onContextMenu)
+    document.addEventListener('pointerlockchange', this.onLockChange)
+    this.scene.add(this.camera)
+    this.applyView()
     this.renderer.setAnimationLoop((t) => this.frame(t))
   }
 
@@ -554,6 +581,7 @@ export class Game {
 
   setPaused(value: boolean) {
     if (!this.started || this.ended || this.role === 'client') return
+    if (value) this.unlockMouse()
     this.paused = value
     this.keys.clear()
     this.emitHud()
@@ -575,6 +603,71 @@ export class Game {
     })
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Vistas de cámara                                                  */
+  /* ---------------------------------------------------------------- */
+
+  /** Cambia entre vista desde arriba, tercera y primera persona. */
+  cycleView() {
+    this.setView(VIEWS[(VIEWS.indexOf(this.view) + 1) % VIEWS.length])
+  }
+
+  setView(v: View) {
+    if (v !== 'top' && this.view === 'top') {
+      // Al entrar en vista de persona, la cámara mira hacia donde mira el personaje
+      this.yaw = this.me.facing
+      this.pitch = v === 'first' ? 0 : 0.3
+    }
+    this.view = v
+    try {
+      localStorage.setItem(VIEW_KEY, v)
+    } catch {
+      // sin almacenamiento: la vista solo dura esta partida
+    }
+    if (v === 'top') this.unlockMouse()
+    this.applyView()
+    const names: Record<View, string> = { top: '🎥 Vista desde arriba', third: '🎥 Tercera persona', first: '🎥 Primera persona' }
+    this.showToast(v === 'top' ? names[v] : `${names[v]} — haz clic para mover la cámara con el mouse`, 'info')
+    this.emitHud()
+  }
+
+  private applyView() {
+    this.camera.fov = this.view === 'top' ? 40 : this.view === 'first' ? 75 : 65
+    this.camera.updateProjectionMatrix()
+    // En primera persona no se dibuja el propio cuerpo
+    this.me.rig.root.visible = this.view !== 'first'
+    if (this.me.nameTag) this.me.nameTag.sprite.visible = this.view === 'top'
+    this.viewModel.visible = this.view === 'first'
+  }
+
+  private unlockMouse() {
+    if (document.pointerLockElement === this.renderer.domElement) document.exitPointerLock()
+  }
+
+  /** Arma que se ve en primera persona. */
+  private updateViewModel(dt: number) {
+    if (this.view !== 'first') return
+    const kind = this.combat.enabled ? this.me.weapon : ''
+    if (kind !== this.viewGunKind) {
+      this.viewGunKind = kind
+      for (const c of [...this.viewModel.children]) {
+        this.viewModel.remove(c)
+        disposeObject(c, false)
+      }
+      if (kind) {
+        const gun = makeGun(kind)
+        gun.scale.setScalar(1.4)
+        this.viewModel.add(gun)
+      }
+    }
+    // Retroceso al disparar y balanceo al caminar
+    const recoil = this.me.firing ? Math.sin(this.clockT * 40) * 0.02 : 0
+    const bob = this.me.moving ? Math.sin(this.clockT * 10) * 0.015 : 0
+    this.viewModel.position.set(0.32, -0.32 + bob, -0.7 + recoil)
+    const spin = this.viewModel.getObjectByName('spin')
+    if (spin && this.me.firing) spin.rotation.z += dt * 30
+  }
+
   selectWeapon(id: string) {
     this.combat.select(this.me, id as WeaponId, true)
     this.emitHud()
@@ -582,6 +675,7 @@ export class Game {
 
   setShop(open: boolean) {
     if (!this.started || this.ended || this.paused) return
+    if (open) this.unlockMouse()
     this.shopOpen = open
     this.keys.clear()
     this.me.firing = false
@@ -599,6 +693,8 @@ export class Game {
     canvas.removeEventListener('pointermove', this.onPointerMove)
     canvas.removeEventListener('pointerdown', this.onPointerDown)
     canvas.removeEventListener('contextmenu', this.onContextMenu)
+    document.removeEventListener('pointerlockchange', this.onLockChange)
+    if (document.pointerLockElement === canvas) document.exitPointerLock()
     this.resize.disconnect()
     disposeObject(this.scene)
     clearMaterialCache()
@@ -621,6 +717,7 @@ export class Game {
     else if (this.started && !frozen) this.tick(dt)
 
     this.animatePlayers(dt)
+    this.updateViewModel(dt)
     this.envUpdate(dt, this.clockT)
     this.updateEffects(dt)
     this.updateCamera(dt)
@@ -726,13 +823,33 @@ export class Game {
   private moveLocal(dt: number) {
     const p = this.me
     const dir = new THREE.Vector3()
+    const person = this.view !== 'top'
     if (!p.working && p.knocked <= 0 && !this.shopOpen) {
-      if (this.keys.has('w') || this.keys.has('arrowup')) dir.z -= 1
-      if (this.keys.has('s') || this.keys.has('arrowdown')) dir.z += 1
-      if (this.keys.has('a') || this.keys.has('arrowleft')) dir.x -= 1
-      if (this.keys.has('d') || this.keys.has('arrowright')) dir.x += 1
+      let fwd = 0
+      let side = 0
+      if (this.keys.has('w') || this.keys.has('arrowup')) fwd += 1
+      if (this.keys.has('s') || this.keys.has('arrowdown')) fwd -= 1
+      if (this.keys.has('a') || this.keys.has('arrowleft')) side -= 1
+      if (this.keys.has('d') || this.keys.has('arrowright')) side += 1
+      if (person) {
+        // W avanza hacia donde mira la cámara
+        const f = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw))
+        const r = new THREE.Vector3(-Math.cos(this.yaw), 0, Math.sin(this.yaw))
+        dir.addScaledVector(f, fwd).addScaledVector(r, side)
+      } else {
+        dir.set(side, 0, -fwd)
+      }
     }
     p.moving = dir.lengthSq() > 0
+    if (person) {
+      // El personaje mira y apunta hacia donde mira la cámara
+      p.facing = this.yaw
+      const f = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw))
+      p.aim.copy(p.pos).addScaledVector(f, 12).setY(1)
+      if (p.moving) p.pos.addScaledVector(dir.normalize(), SPEED * this.combat.speedFactor * dt)
+      this.collide(p.pos)
+      return
+    }
     const aiming = this.combat.enabled && p.firing && p.knocked <= 0
     if (p.moving) {
       dir.normalize()
@@ -1106,6 +1223,32 @@ export class Game {
   /* ---------------------------------------------------------------- */
 
   private updateCamera(dt: number) {
+    const me = this.me
+    if (this.view !== 'top') {
+      const f = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw))
+      const down = me.knocked > 0
+      if (this.view === 'first') {
+        const eye = me.pos.clone().add(new THREE.Vector3(0, down ? 0.4 : 1.45, 0)).addScaledVector(f, 0.12)
+        this.camera.position.copy(eye)
+        const look = new THREE.Vector3(Math.sin(this.yaw) * Math.cos(this.pitch), Math.sin(this.pitch), Math.cos(this.yaw) * Math.cos(this.pitch))
+        this.camera.lookAt(eye.clone().add(look))
+      } else {
+        // Tercera persona: detrás y arriba del personaje
+        // Tercera persona: detrás y sobre el hombro derecho, para que el personaje no tape la mira
+        const dist = 5.2
+        const elev = THREE.MathUtils.clamp(this.pitch, 0.05, 1.1)
+        const right = new THREE.Vector3(-Math.cos(this.yaw), 0, Math.sin(this.yaw))
+        const goal = me.pos
+          .clone()
+          .addScaledVector(f, -dist * Math.cos(elev))
+          .addScaledVector(right, 0.9)
+          .add(new THREE.Vector3(0, 1.4 + dist * Math.sin(elev), 0))
+        this.camera.position.lerp(goal, Math.min(1, dt * 12 || 1))
+        this.camera.lookAt(me.pos.clone().add(new THREE.Vector3(0, 1.4, 0)).addScaledVector(f, 3).addScaledVector(right, 0.9))
+      }
+      this.camFocus.copy(me.pos)
+      return
+    }
     const aspect = this.camera.aspect
     // En pantallas angostas la cámara se aleja y sigue más al jugador en X.
     const narrow = aspect < 1.2
@@ -1167,6 +1310,8 @@ export class Game {
         bosses: this.combat.bosses(),
       },
       shopOpen: this.shopOpen,
+      view: this.view,
+      locked: this.locked,
       started: this.started,
       role: this.role,
       team: this.players.map((p) => ({ name: p.name, color: p.color, hp: Math.round(p.hp), me: p === me, knocked: p.knocked > 0 })),
@@ -1205,6 +1350,10 @@ export class Game {
       return
     }
     if (this.shopOpen) return
+    if (k === 'v' || k === 'c') {
+      if (!e.repeat) this.cycleView()
+      return
+    }
     if (this.combat.selectByKey(this.me, k)) {
       this.emitHud()
       return
@@ -1230,6 +1379,13 @@ export class Game {
   }
 
   private onPointerMove = (e: PointerEvent) => {
+    if (this.view !== 'top') {
+      if (!this.locked) return
+      this.yaw -= e.movementX * 0.0025
+      const min = this.view === 'first' ? -1.2 : 0.05
+      this.pitch = THREE.MathUtils.clamp(this.pitch - e.movementY * 0.0025 * (this.view === 'first' ? 1 : -1), min, this.view === 'first' ? 1.2 : 1.1)
+      return
+    }
     const rect = this.renderer.domElement.getBoundingClientRect()
     const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1)
     this.raycaster.setFromCamera(ndc, this.camera)
@@ -1242,7 +1398,12 @@ export class Game {
 
   private onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0) return
-    this.onPointerMove(e)
+    if (this.view !== 'top' && !this.locked) {
+      // El primer clic captura el mouse para girar la cámara
+      if (this.started && !this.paused && !this.shopOpen) void this.renderer.domElement.requestPointerLock()
+      return
+    }
+    if (this.view === 'top') this.onPointerMove(e)
     if (!this.started || this.paused || this.shopOpen || this.ended) return
     this.me.firing = true
   }
@@ -1252,6 +1413,12 @@ export class Game {
   }
 
   private onContextMenu = (e: Event) => e.preventDefault()
+
+  private onLockChange = () => {
+    this.locked = document.pointerLockElement === this.renderer.domElement
+    if (!this.locked) this.me.firing = false
+    this.emitHud()
+  }
 
   /* ---------------------------------------------------------------- */
   /* Máquinas dañadas y flecha de ayuda                                */
@@ -1280,7 +1447,7 @@ export class Game {
         this.smoke.splice(i, 1)
       }
     }
-    this.reticle.visible = this.combat.enabled && this.clockT - this.aimT < 3
+    this.reticle.visible = this.view === 'top' && this.combat.enabled && this.clockT - this.aimT < 3
     this.reticle.position.set(this.me.aim.x, 0.05, this.me.aim.z)
   }
 

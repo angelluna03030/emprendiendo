@@ -7,9 +7,12 @@ interface Props {
   onPause: () => void
   onShop: () => void
   onWeapon: (id: string) => void
+  onView: () => void
 }
 
-export function Hud({ hud, onPause, onShop, onWeapon }: Props) {
+const VIEW_LABEL = { top: '🎥 Arriba', third: '🎥 3ª persona', first: '🎥 1ª persona' } as const
+
+export function Hud({ hud, onPause, onShop, onWeapon, onView }: Props) {
   const info = LEVELS[hud.levelId - 1]
   const limit = hud.deadline ?? hud.duration
   const left = limit !== null ? limit - hud.elapsed : null
@@ -18,7 +21,11 @@ export function Hud({ hud, onPause, onShop, onWeapon }: Props) {
   const hurt = hud.elapsed - hud.hurtAt < 0.35
 
   return (
-    <div className="hud">
+    <div className={`hud ${hud.view !== 'top' ? 'person' : ''}`}>
+      {hud.view !== 'top' && <div className={`crosshair ${hud.locked ? '' : 'dim'}`} />}
+      {hud.view !== 'top' && !hud.locked && hud.started && !hud.ended && (
+        <div className="lock-hint">🖱️ Haz clic en el juego para mover la cámara con el mouse · <kbd>V</kbd> cambia la vista</div>
+      )}
       {hurt && <div className="hurt-flash" />}
       {hud.knocked > 0 && (
         <div className="knocked">
@@ -74,6 +81,9 @@ export function Hud({ hud, onPause, onShop, onWeapon }: Props) {
         <div className="hud-stats">
           <div className="pill score">⭐ {hud.score}</div>
           <div className="pill money">💰 ${hud.money}</div>
+          <button className="pill view-btn" onClick={onView} title="Cambiar vista (V)">
+            {VIEW_LABEL[hud.view]}
+          </button>
           <button className="pill pause-btn" onClick={onPause} title="Pausa (Esc)">
             ⏸
           </button>

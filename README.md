@@ -23,6 +23,7 @@ En desarrollo puedes abrir un nivel directo con `?nivel=1` … `?nivel=4` (ese m
 | `B` | Tienda (robots, máquinas, armas) |
 | Mouse | Apuntar · clic = disparo · mantener = ráfaga |
 | `1` … `7` | Pistola, subfusil, escopeta, rifle láser, lanzallamas, bazuca, minigun |
+| `V` | Cambiar vista: desde arriba, 3ª persona o 1ª persona |
 | `Esc` | Pausa |
 
 ## Modo zombis

@@ -1496,3 +1496,56 @@ kbd {
 .mate-hp {
   margin-left: auto;
 }
+
+/* ---------------- Vistas de 1ª y 3ª persona ---------------- */
+
+.pill.view-btn {
+  cursor: pointer;
+  font-size: 0.95rem;
+  background: #e0e7ff;
+}
+
+.crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 26px;
+  height: 26px;
+  transform: translate(-50%, -50%);
+  border: 3px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.6);
+}
+
+.crosshair::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #ef4444;
+}
+
+.crosshair.dim {
+  opacity: 0.4;
+}
+
+.lock-hint {
+  position: absolute;
+  top: 58%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.8);
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.lock-hint kbd {
+  color: var(--ink);
+}

@@ -206,6 +206,10 @@ export interface HudState {
   weapons: WeaponSlot[]
   zombies: { enabled: boolean; alive: number; wave: number; nextWave: number; kills: number; bosses: { hp: number; max: number }[] }
   shopOpen: boolean
+  /** Vista de cámara: desde arriba, tercera o primera persona. */
+  view: 'top' | 'third' | 'first'
+  /** El mouse está capturado para mover la cámara. */
+  locked: boolean
   started: boolean
   role: 'solo' | 'host' | 'client'
   team: { name: string; color: number; hp: number; me: boolean; knocked: boolean }[]
