@@ -1549,3 +1549,16 @@ kbd {
 .lock-hint kbd {
   color: var(--ink);
 }
+
+.lobby-warn {
+  background: #fef3c7;
+  border: 3px solid #d97706;
+  border-radius: 14px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+}
+
+.small-note {
+  font-size: 0.9rem;
+  margin-top: 10px;
+}

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { LEVELS } from '../game/levels'
 import type { LevelId } from '../game/types'
-import { MAX_PLAYERS, roomLink, type Session } from '../net/session'
+import { isLocalOnly, MAX_PLAYERS, roomLink, type Session } from '../net/session'
 
 interface Props {
   session: Session | null
@@ -80,6 +80,12 @@ export function Lobby(props: Props) {
               </h3>
               {session.isHost ? (
                 <>
+                  {isLocalOnly() && (
+                    <div className="lobby-warn">
+                      ⚠️ Este link empieza con <b>localhost</b>: solo funciona en <b>este computador</b>. Para jugar con otras
+                      personas abre el juego desde su dirección publicada (por ejemplo el link de Vercel) y crea la sala desde ahí.
+                    </div>
+                  )}
                   <p>Envía este link a tus amigos para que entren:</p>
                   <div className="link-row">
                     <input readOnly value={roomLink(session.code)} onFocus={(e) => e.target.select()} />
@@ -87,6 +93,10 @@ export function Lobby(props: Props) {
                       {copied ? '✓ Copiado' : '📋 Copiar'}
                     </button>
                   </div>
+                  <p className="muted small-note">
+                    💡 Deja esta pestaña abierta y visible mientras tus amigos entran y durante la partida (en el celular, no
+                    cambies de app). Si alguien no logra conectarse, prueben con otra red, por ejemplo datos móviles.
+                  </p>
                 </>
               ) : (
                 <p className="muted">Estás conectado. El anfitrión elige el nivel y empieza la partida.</p>

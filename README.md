@@ -51,6 +51,22 @@ escribe su nombre y entra al lobby. El anfitrión elige el nivel y empieza.
 - Dinero y puntaje son del equipo. Con más jugadores: más zombis, jefes con más vida y más producción
   (más piezas, lotes más grandes, meta de chips mayor, pedidos más grandes).
 - Algunas redes (colegios, universidades) bloquean conexiones P2P; si no conecta, prueben con datos móviles.
+- El link solo funciona para otras personas si el juego está **publicado** (por ejemplo en Vercel). Un link que
+  empieza con `http://localhost` solo abre en tu propio computador.
+
+### Conectar desde redes distintas (servidor TURN)
+
+Cuando los jugadores están en redes diferentes (otra casa, datos móviles, wifi de colegio), muchas veces la conexión
+directa se bloquea y aparece *"La sala existe, pero tu red no permite conectarse"*. Para eso se usa un servidor TURN
+que retransmite los datos. Hay uno gratuito:
+
+1. Crea una cuenta gratis en [Metered Open Relay](https://www.metered.ca/tools/openrelay/) y copia el usuario y la
+   clave TURN de tu panel.
+2. En Vercel → tu proyecto → **Settings → Environment Variables** agrega `VITE_TURN_URL`, `VITE_TURN_USERNAME` y
+   `VITE_TURN_CREDENTIAL` (mira `.env.example`).
+3. Vuelve a desplegar (Redeploy) para que el juego use las variables.
+
+Las credenciales quedan visibles en el código del navegador; usa una cuenta gratuita solo para este juego.
 
 ## Ficha técnica
 

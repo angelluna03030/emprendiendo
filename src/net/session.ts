@@ -1,4 +1,4 @@
-import Peer, { type DataConnection } from 'peerjs'
+import Peer, { type DataConnection, type PeerOptions } from 'peerjs'
 import type { LevelId } from '../game/types'
 
 /**
@@ -29,6 +29,37 @@ export interface StartInfo {
 export type NetMsg = { t: string; [k: string]: any }
 
 type GameHandler = (from: string, msg: NetMsg) => void
+
+/**
+ * Servidores para atravesar routers y firewalls.
+ * STUN descubre la dirección pública; TURN retransmite los datos cuando la
+ * conexión directa está bloqueada (datos móviles, redes de colegio, etc.).
+ * El TURN se configura con variables de entorno en Vercel (ver README):
+ * VITE_TURN_URL (una o varias URLs separadas por coma), VITE_TURN_USERNAME y VITE_TURN_CREDENTIAL.
+ */
+function iceServers(): RTCIceServer[] {
+  const servers: RTCIceServer[] = [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:global.stun.twilio.com:3478'] },
+  ]
+  const env = import.meta.env
+  if (env.VITE_TURN_URL) {
+    servers.push({
+      urls: String(env.VITE_TURN_URL).split(',').map((u) => u.trim()),
+      username: env.VITE_TURN_USERNAME,
+      credential: env.VITE_TURN_CREDENTIAL,
+    })
+  }
+  return servers
+}
+
+const PEER_OPTIONS: PeerOptions = { config: { iceServers: iceServers() }, debug: 1 }
+
+/** El link solo sirve en este computador si el juego corre en localhost. */
+export function isLocalOnly() {
+  return ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 function randomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -72,7 +103,7 @@ export class Session {
   static host(name: string): Promise<Session> {
     return new Promise((resolve, reject) => {
       const code = randomCode()
-      const peer = new Peer(PREFIX + code)
+      const peer = new Peer(PREFIX + code, PEER_OPTIONS)
       const s = new Session('host', peer)
       s.code = code
       peer.on('open', (id) => {
@@ -87,46 +118,99 @@ export class Session {
         if (s.status === 'connecting') reject(new Error(describe(err)))
         else s.fail(describe(err))
       })
-      peer.on('disconnected', () => peer.reconnect())
+      // Si se pierde el contacto con el servidor de salas, reconectar para que la sala siga visible
+      peer.on('disconnected', () => {
+        if (s.status !== 'closed') setTimeout(() => !peer.destroyed && peer.reconnect(), 1000)
+      })
     })
   }
 
-  static join(code: string, name: string): Promise<Session> {
+  /**
+   * Se une a una sala. Reintenta varias veces porque la sala puede tardar
+   * unos segundos en aparecer (o el anfitrión puede estar reconectando).
+   */
+  static async join(code: string, name: string): Promise<Session> {
+    const clean = code.trim().toUpperCase()
+    let last: Error = new Error('No se pudo conectar.')
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await Session.tryJoin(clean, name)
+      } catch (e) {
+        last = e as Error
+        // Sala llena o partida en curso: no tiene sentido reintentar
+        if ((e as { final?: boolean }).final) break
+        await sleep(1500)
+      }
+    }
+    throw last
+  }
+
+  private static tryJoin(code: string, name: string): Promise<Session> {
     return new Promise((resolve, reject) => {
-      const peer = new Peer()
+      const peer = new Peer(PEER_OPTIONS)
       const s = new Session('client', peer)
-      s.code = code.toUpperCase()
-      const timeout = setTimeout(() => {
-        reject(new Error('No se encontró la sala. Revisa el link o pide al anfitrión que la cree de nuevo.'))
+      s.code = code
+      let phase: 'server' | 'connect' | 'hello' = 'server'
+      let done = false
+
+      const fail = (message: string, final = false) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
         peer.destroy()
-      }, 12000)
+        reject(Object.assign(new Error(message), { final }))
+      }
+      const timer = setTimeout(() => {
+        if (phase === 'server') fail('No hay conexión con el servidor de salas. Revisa tu internet.')
+        else if (phase === 'connect')
+          fail(
+            'La sala existe, pero tu red no permite conectarse con el anfitrión. Prueben con otra red (por ejemplo datos móviles) o que el anfitrión use otra conexión.',
+          )
+        else fail('El anfitrión no respondió. Pídele que tenga el juego abierto en el lobby, sin cambiar de pestaña.')
+      }, 15000)
+
       peer.on('open', (id) => {
         s.meId = id
-        const conn = peer.connect(PREFIX + s.code, { reliable: true })
+        phase = 'connect'
+        const conn = peer.connect(PREFIX + code, { reliable: true })
         s.host = conn
-        conn.on('open', () => conn.send({ t: 'hello', name }))
+        conn.on('open', () => {
+          phase = 'hello'
+          conn.send({ t: 'hello', name })
+        })
         conn.on('data', (data) => {
           const msg = data as NetMsg
           if (msg.t === 'full' || msg.t === 'busy') {
-            clearTimeout(timeout)
-            reject(new Error(msg.t === 'full' ? 'La sala está llena (máximo 3 jugadores).' : 'La partida ya empezó. Espera a que termine el nivel.'))
-            peer.destroy()
+            fail(msg.t === 'full' ? 'La sala está llena (máximo 3 jugadores).' : 'La partida ya empezó. Espera a que termine el nivel y vuelve a abrir el link.', true)
             return
           }
-          if (msg.t === 'lobby' && s.status === 'connecting') {
-            clearTimeout(timeout)
+          if (msg.t === 'lobby' && !done) {
+            done = true
+            clearTimeout(timer)
             s.status = 'lobby'
             resolve(s)
           }
           s.fromHost(msg)
         })
-        conn.on('close', () => s.fail('El anfitrión cerró la sala.'))
+        conn.on('error', () => {
+          if (!done) fail('Falló la conexión con el anfitrión. Intenta otra vez.')
+        })
+        conn.on('close', () => {
+          if (done) s.fail('Se perdió la conexión con el anfitrión (cerró la sala o se desconectó).')
+        })
       })
       peer.on('error', (err) => {
-        if (s.status === 'connecting') {
-          clearTimeout(timeout)
-          reject(new Error(describe(err)))
+        const type = (err as { type?: string }).type
+        if (!done) {
+          if (type === 'peer-unavailable')
+            fail(`No existe la sala ${code}. Verifica que el anfitrión tenga el lobby abierto (sin cerrar ni cambiar de app) y que el link esté completo.`)
+          else fail(describe(err))
         } else s.fail(describe(err))
+      })
+      peer.on('disconnected', () => {
+        // Solo afecta al servidor de salas; la conexión con el anfitrión sigue
+        if (!done) return
+        setTimeout(() => !peer.destroyed && peer.reconnect(), 1000)
       })
     })
   }
