@@ -8,9 +8,10 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-     "ok": "bun run format && bun run build && git add ."
+    "ok": "bun run format && bun run build && git add ."
   },
   "dependencies": {
+    "mqtt": "^5.16.0",
     "peerjs": "^1.5.5",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

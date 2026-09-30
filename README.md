@@ -45,20 +45,22 @@ La música de fondo es `src/assets/sonido.mp3` y se puede apagar desde el menú 
 Menú → **👥 Jugar en equipo** → *Crear sala* → copia el link (`?sala=CODIGO`) y envíalo. Quien abre el link
 escribe su nombre y entra al lobby. El anfitrión elige el nivel y empieza.
 
-- Conexión directa entre navegadores con [PeerJS](https://peerjs.com) (usa su servidor público gratuito solo para
-  presentarse; no hay servidor propio). Funciona desplegado en Vercel.
-- El navegador del anfitrión simula la partida: su pestaña debe quedar abierta y visible.
+- Primero se intenta la conexión directa entre navegadores con [PeerJS](https://peerjs.com). Si la red la bloquea
+  (datos móviles, wifi de colegio, otra casa), el juego usa automáticamente un **servidor de relevo MQTT público**
+  (EMQX o HiveMQ, por WebSocket seguro), que funciona casi en cualquier red. No hay que configurar nada.
+- En el lobby el invitado ve cómo quedó conectado: ⚡ directa o 🛰️ por servidor de relevo.
+- El navegador del anfitrión simula la partida: su pestaña debe quedar abierta (puede estar en segundo plano).
+- Para probar el relevo en un solo computador, agrega `&relay=1` al link de invitado.
 - Dinero y puntaje son del equipo. Con más jugadores: más zombis, jefes con más vida y más producción
   (más piezas, lotes más grandes, meta de chips mayor, pedidos más grandes).
 - Algunas redes (colegios, universidades) bloquean conexiones P2P; si no conecta, prueben con datos móviles.
 - El link solo funciona para otras personas si el juego está **publicado** (por ejemplo en Vercel). Un link que
   empieza con `http://localhost` solo abre en tu propio computador.
 
-### Conectar desde redes distintas (servidor TURN)
+### Opcional: servidor TURN propio
 
-Cuando los jugadores están en redes diferentes (otra casa, datos móviles, wifi de colegio), muchas veces la conexión
-directa se bloquea y aparece *"La sala existe, pero tu red no permite conectarse"*. Para eso se usa un servidor TURN
-que retransmite los datos. Hay uno gratuito:
+El relevo MQTT ya cubre las redes difíciles. Si además quieres que la conexión directa funcione en más redes,
+puedes configurar un servidor TURN gratuito:
 
 1. Crea una cuenta gratis en [Metered Open Relay](https://www.metered.ca/tools/openrelay/) y copia el usuario y la
    clave TURN de tu panel.

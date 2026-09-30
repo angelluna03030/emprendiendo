@@ -1,10 +1,16 @@
+import type { MqttClient } from 'mqtt'
 import Peer, { type DataConnection, type PeerOptions } from 'peerjs'
 import type { LevelId } from '../game/types'
+import { connectAll, connectAny, parse, publish, topicGuest, topicHost } from './relay'
 
 /**
- * Sala cooperativa con PeerJS (conexión directa entre navegadores).
- * El anfitrión simula la partida; los invitados envían sus controles
- * y reciben el estado del juego. Máximo 3 jugadores.
+ * Sala cooperativa (máximo 3 jugadores).
+ * El anfitrión simula la partida; los invitados envían sus controles y reciben el estado.
+ *
+ * Hay dos caminos de conexión:
+ * 1. Directo entre navegadores con PeerJS/WebRTC (el más rápido).
+ * 2. Relevo por un servidor MQTT público (plan B cuando la red bloquea la conexión directa).
+ * El anfitrión escucha por los dos; el invitado prueba el directo y, si falla, usa el relevo.
  */
 
 export const MAX_PLAYERS = 3
@@ -30,12 +36,18 @@ export type NetMsg = { t: string; [k: string]: any }
 
 type GameHandler = (from: string, msg: NetMsg) => void
 
+/** Un canal hacia otro jugador, directo o por relevo. */
+interface Link {
+  via: 'directa' | 'servidor'
+  send: (msg: NetMsg) => void
+  close: () => void
+  lastSeen: number
+}
+
 /**
- * Servidores para atravesar routers y firewalls.
- * STUN descubre la dirección pública; TURN retransmite los datos cuando la
- * conexión directa está bloqueada (datos móviles, redes de colegio, etc.).
- * El TURN se configura con variables de entorno en Vercel (ver README):
- * VITE_TURN_URL (una o varias URLs separadas por coma), VITE_TURN_USERNAME y VITE_TURN_CREDENTIAL.
+ * Servidores STUN/TURN para la conexión directa.
+ * Un TURN propio se puede configurar en Vercel con VITE_TURN_URL (URLs separadas por coma),
+ * VITE_TURN_USERNAME y VITE_TURN_CREDENTIAL. Sin TURN, el relevo MQTT cubre las redes difíciles.
  */
 function iceServers(): RTCIceServer[] {
   const servers: RTCIceServer[] = [
@@ -53,13 +65,15 @@ function iceServers(): RTCIceServer[] {
 }
 
 const PEER_OPTIONS: PeerOptions = { config: { iceServers: iceServers() }, debug: 1 }
+const DIRECT_TIMEOUT = 7000
+const RELAY_TIMEOUT = 9000
+const HEARTBEAT = 3000
+const DEAD_AFTER = 12000
 
 /** El link solo sirve en este computador si el juego corre en localhost. */
 export function isLocalOnly() {
   return ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
 }
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 function randomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -70,6 +84,12 @@ export function roomLink(code: string) {
   return `${location.origin}${location.pathname}?sala=${code}`
 }
 
+type JoinError = Error & { final?: boolean }
+
+function joinError(message: string, final = false): JoinError {
+  return Object.assign(new Error(message), { final })
+}
+
 export class Session {
   readonly role: 'host' | 'client'
   code = ''
@@ -78,6 +98,8 @@ export class Session {
   status: 'connecting' | 'lobby' | 'closed' = 'connecting'
   error = ''
   inGame = false
+  /** Invitado: cómo quedó conectado. */
+  via: 'directa' | 'servidor' = 'directa'
 
   /** React escucha cambios del lobby. */
   onChange: (() => void) | null = null
@@ -86,170 +108,144 @@ export class Session {
   /** Invitado: el anfitrión terminó el nivel (resultado) o volvió al lobby. */
   onEnd: ((msg: NetMsg) => void) | null = null
 
-  private peer: Peer
-  private conns = new Map<string, DataConnection>()
-  private host: DataConnection | null = null
+  private peer: Peer | null = null
+  private brokers: MqttClient[] = []
+  /** Anfitrión: canal hacia cada invitado. */
+  private links = new Map<string, Link>()
+  /** Invitado: canal hacia el anfitrión. */
+  private host: Link | null = null
   private gameHandler: GameHandler | null = null
+  private heartbeat: ReturnType<typeof setInterval> | null = null
 
-  private constructor(role: 'host' | 'client', peer: Peer) {
+  private constructor(role: 'host' | 'client') {
     this.role = role
-    this.peer = peer
-  }
-
-  /* ---------------------------------------------------------------- */
-  /* Crear o unirse                                                    */
-  /* ---------------------------------------------------------------- */
-
-  static host(name: string): Promise<Session> {
-    return new Promise((resolve, reject) => {
-      const code = randomCode()
-      const peer = new Peer(PREFIX + code, PEER_OPTIONS)
-      const s = new Session('host', peer)
-      s.code = code
-      peer.on('open', (id) => {
-        s.meId = id
-        s.players = [{ id, name, color: PLAYER_COLORS[0] }]
-        s.status = 'lobby'
-        resolve(s)
-        s.changed()
-      })
-      peer.on('connection', (conn) => s.acceptGuest(conn))
-      peer.on('error', (err) => {
-        if (s.status === 'connecting') reject(new Error(describe(err)))
-        else s.fail(describe(err))
-      })
-      // Si se pierde el contacto con el servidor de salas, reconectar para que la sala siga visible
-      peer.on('disconnected', () => {
-        if (s.status !== 'closed') setTimeout(() => !peer.destroyed && peer.reconnect(), 1000)
-      })
-    })
-  }
-
-  /**
-   * Se une a una sala. Reintenta varias veces porque la sala puede tardar
-   * unos segundos en aparecer (o el anfitrión puede estar reconectando).
-   */
-  static async join(code: string, name: string): Promise<Session> {
-    const clean = code.trim().toUpperCase()
-    let last: Error = new Error('No se pudo conectar.')
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        return await Session.tryJoin(clean, name)
-      } catch (e) {
-        last = e as Error
-        // Sala llena o partida en curso: no tiene sentido reintentar
-        if ((e as { final?: boolean }).final) break
-        await sleep(1500)
-      }
-    }
-    throw last
-  }
-
-  private static tryJoin(code: string, name: string): Promise<Session> {
-    return new Promise((resolve, reject) => {
-      const peer = new Peer(PEER_OPTIONS)
-      const s = new Session('client', peer)
-      s.code = code
-      let phase: 'server' | 'connect' | 'hello' = 'server'
-      let done = false
-
-      const fail = (message: string, final = false) => {
-        if (done) return
-        done = true
-        clearTimeout(timer)
-        peer.destroy()
-        reject(Object.assign(new Error(message), { final }))
-      }
-      const timer = setTimeout(() => {
-        if (phase === 'server') fail('No hay conexión con el servidor de salas. Revisa tu internet.')
-        else if (phase === 'connect')
-          fail(
-            'La sala existe, pero tu red no permite conectarse con el anfitrión. Prueben con otra red (por ejemplo datos móviles) o que el anfitrión use otra conexión.',
-          )
-        else fail('El anfitrión no respondió. Pídele que tenga el juego abierto en el lobby, sin cambiar de pestaña.')
-      }, 15000)
-
-      peer.on('open', (id) => {
-        s.meId = id
-        phase = 'connect'
-        const conn = peer.connect(PREFIX + code, { reliable: true })
-        s.host = conn
-        conn.on('open', () => {
-          phase = 'hello'
-          conn.send({ t: 'hello', name })
-        })
-        conn.on('data', (data) => {
-          const msg = data as NetMsg
-          if (msg.t === 'full' || msg.t === 'busy') {
-            fail(msg.t === 'full' ? 'La sala está llena (máximo 3 jugadores).' : 'La partida ya empezó. Espera a que termine el nivel y vuelve a abrir el link.', true)
-            return
-          }
-          if (msg.t === 'lobby' && !done) {
-            done = true
-            clearTimeout(timer)
-            s.status = 'lobby'
-            resolve(s)
-          }
-          s.fromHost(msg)
-        })
-        conn.on('error', () => {
-          if (!done) fail('Falló la conexión con el anfitrión. Intenta otra vez.')
-        })
-        conn.on('close', () => {
-          if (done) s.fail('Se perdió la conexión con el anfitrión (cerró la sala o se desconectó).')
-        })
-      })
-      peer.on('error', (err) => {
-        const type = (err as { type?: string }).type
-        if (!done) {
-          if (type === 'peer-unavailable')
-            fail(`No existe la sala ${code}. Verifica que el anfitrión tenga el lobby abierto (sin cerrar ni cambiar de app) y que el link esté completo.`)
-          else fail(describe(err))
-        } else s.fail(describe(err))
-      })
-      peer.on('disconnected', () => {
-        // Solo afecta al servidor de salas; la conexión con el anfitrión sigue
-        if (!done) return
-        setTimeout(() => !peer.destroyed && peer.reconnect(), 1000)
-      })
-    })
   }
 
   /* ---------------------------------------------------------------- */
   /* Anfitrión                                                         */
   /* ---------------------------------------------------------------- */
 
-  private acceptGuest(conn: DataConnection) {
-    conn.on('data', (data) => {
-      const msg = data as NetMsg
-      if (msg.t === 'hello') {
-        if (this.players.length >= MAX_PLAYERS) {
-          conn.send({ t: 'full' })
-          setTimeout(() => conn.close(), 300)
-          return
-        }
-        if (this.inGame) {
-          conn.send({ t: 'busy' })
-          setTimeout(() => conn.close(), 300)
-          return
-        }
-        const used = new Set(this.players.map((p) => p.color))
-        const color = PLAYER_COLORS.find((c) => !used.has(c)) ?? PLAYER_COLORS[1]
-        this.conns.set(conn.peer, conn)
-        this.players.push({ id: conn.peer, name: String(msg.name || 'Jugador').slice(0, 14), color })
-        this.broadcastLobby()
-        this.changed()
-        return
+  static async host(name: string): Promise<Session> {
+    const s = new Session('host')
+    s.code = randomCode()
+    s.meId = PREFIX + s.code
+
+    // Los dos caminos se abren en paralelo; basta con que funcione uno.
+    const [direct, relay] = await Promise.allSettled([s.openPeer(), connectAll()])
+    if (relay.status === 'fulfilled') {
+      s.brokers = relay.value
+      for (const b of s.brokers) {
+        b.subscribe(topicHost(s.code), { qos: 1 })
+        b.on('message', (_topic, payload) => s.fromRelayGuest(b, payload))
       }
-      this.gameHandler?.(conn.peer, msg)
+    }
+    if (direct.status === 'rejected' && s.brokers.length === 0) {
+      s.close()
+      throw new Error('No hay conexión con los servidores de salas. Revisa tu internet e intenta de nuevo.')
+    }
+
+    s.players = [{ id: s.meId, name, color: PLAYER_COLORS[0] }]
+    s.status = 'lobby'
+    s.heartbeat = setInterval(() => s.hostHeartbeat(), HEARTBEAT)
+    return s
+  }
+
+  private openPeer(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const peer = new Peer(this.meId, PEER_OPTIONS)
+      this.peer = peer
+      const timer = setTimeout(() => reject(new Error('peer timeout')), 8000)
+      peer.on('open', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+      peer.on('connection', (conn) => this.acceptDirect(conn))
+      peer.on('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
+      // Si se pierde el contacto con el servidor de PeerJS, reconectar para que la sala siga visible
+      peer.on('disconnected', () => {
+        if (this.status !== 'closed') setTimeout(() => !peer.destroyed && peer.reconnect(), 1000)
+      })
     })
+  }
+
+  private acceptDirect(conn: DataConnection) {
+    const link: Link = {
+      via: 'directa',
+      send: (msg) => conn.open && conn.send(msg),
+      close: () => conn.close(),
+      lastSeen: Date.now(),
+    }
+    conn.on('data', (data) => this.fromGuest(conn.peer, link, data as NetMsg))
     conn.on('close', () => this.dropGuest(conn.peer))
     conn.on('error', () => this.dropGuest(conn.peer))
   }
 
+  private fromRelayGuest(broker: MqttClient, payload: Uint8Array) {
+    const data = parse(payload)
+    if (!data) return
+    const id = data.f
+    let link = this.links.get(id)
+    if (!link) {
+      if (data.m.t !== 'hello') return
+      link = {
+        via: 'servidor',
+        send: (msg) => publish(broker, topicGuest(this.code, id), this.meId, msg),
+        close: () => publish(broker, topicGuest(this.code, id), this.meId, { t: 'bye' }),
+        lastSeen: Date.now(),
+      }
+    }
+    if (data.m.t === 'bye') {
+      this.dropGuest(id)
+      return
+    }
+    this.fromGuest(id, link, data.m)
+  }
+
+  private fromGuest(id: string, link: Link, msg: NetMsg) {
+    link.lastSeen = Date.now()
+    if (msg.t === 'ping') return
+    if (msg.t === 'hello') {
+      if (this.links.has(id)) {
+        // Hola repetido (reintento): reenviar el lobby
+        link.send({ t: 'lobby', players: this.players })
+        return
+      }
+      if (this.players.length >= MAX_PLAYERS) {
+        link.send({ t: 'full' })
+        return
+      }
+      if (this.inGame) {
+        link.send({ t: 'busy' })
+        return
+      }
+      const used = new Set(this.players.map((p) => p.color))
+      const color = PLAYER_COLORS.find((c) => !used.has(c)) ?? PLAYER_COLORS[1]
+      this.links.set(id, link)
+      this.players.push({ id, name: String(msg.name || 'Jugador').slice(0, 14), color })
+      this.broadcastLobby()
+      this.changed()
+      return
+    }
+    if (!this.links.has(id)) return
+    this.gameHandler?.(id, msg)
+  }
+
+  /** Mantiene vivos los canales por relevo y quita a quien se fue sin avisar. */
+  private hostHeartbeat() {
+    const now = Date.now()
+    for (const [id, link] of this.links) {
+      if (link.via !== 'servidor') continue
+      if (now - link.lastSeen > DEAD_AFTER) this.dropGuest(id)
+      else link.send({ t: 'ping' })
+    }
+  }
+
   private dropGuest(id: string) {
-    if (!this.conns.has(id)) return
-    this.conns.delete(id)
+    if (!this.links.has(id)) return
+    this.links.delete(id)
     this.players = this.players.filter((p) => p.id !== id)
     this.gameHandler?.(id, { t: 'leave' })
     this.broadcastLobby()
@@ -261,7 +257,7 @@ export class Session {
   }
 
   broadcast(msg: NetMsg) {
-    for (const c of this.conns.values()) if (c.open) c.send(msg)
+    for (const link of this.links.values()) link.send(msg)
   }
 
   /** El anfitrión inicia un nivel para todos. */
@@ -281,8 +277,160 @@ export class Session {
   /* Invitado                                                          */
   /* ---------------------------------------------------------------- */
 
+  /**
+   * Se une a una sala: primero intenta la conexión directa y, si la red
+   * la bloquea, se conecta por el relevo del servidor.
+   */
+  static async join(code: string, name: string): Promise<Session> {
+    const clean = code.trim().toUpperCase()
+    // `&relay=1` en el link fuerza el relevo (útil para probar)
+    const forceRelay = new URLSearchParams(location.search).has('relay')
+    if (!forceRelay) {
+      try {
+        return await Session.joinDirect(clean, name)
+      } catch (e) {
+        if ((e as JoinError).final) throw e
+      }
+    }
+    try {
+      return await Session.joinRelay(clean, name)
+    } catch (e) {
+      const relayError = e as JoinError
+      if (relayError.final) throw relayError
+      throw joinError(
+        `No se pudo entrar a la sala ${clean}. Verifica que el anfitrión tenga el lobby abierto (sin cerrar la pestaña ni cambiar de app) y que el link esté completo.`,
+      )
+    }
+  }
+
+  private static joinDirect(code: string, name: string): Promise<Session> {
+    return new Promise((resolve, reject) => {
+      const peer = new Peer(PEER_OPTIONS)
+      const s = new Session('client')
+      s.peer = peer
+      s.code = code
+      let done = false
+
+      const fail = (message: string, final = false) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        peer.destroy()
+        reject(joinError(message, final))
+      }
+      const timer = setTimeout(() => fail('La conexión directa no abrió a tiempo.'), DIRECT_TIMEOUT)
+
+      peer.on('open', (id) => {
+        s.meId = id
+        const conn = peer.connect(PREFIX + code, { reliable: true })
+        s.host = { via: 'directa', send: (msg) => conn.open && conn.send(msg), close: () => conn.close(), lastSeen: Date.now() }
+        conn.on('open', () => conn.send({ t: 'hello', name }))
+        conn.on('data', (data) => {
+          const msg = data as NetMsg
+          if (msg.t === 'full' || msg.t === 'busy') {
+            fail(msg.t === 'full' ? 'La sala está llena (máximo 3 jugadores).' : 'La partida ya empezó. Espera a que termine el nivel y vuelve a abrir el link.', true)
+            return
+          }
+          if (msg.t === 'lobby' && !done) {
+            done = true
+            clearTimeout(timer)
+            s.status = 'lobby'
+            s.via = 'directa'
+            resolve(s)
+          }
+          s.fromHost(msg)
+        })
+        conn.on('error', () => fail('Falló la conexión directa.'))
+        conn.on('close', () => {
+          if (done) s.fail('Se perdió la conexión con el anfitrión (cerró la sala o se desconectó).')
+        })
+      })
+      peer.on('error', (err) => {
+        if (!done) fail(describe(err))
+        else s.fail(describe(err))
+      })
+      peer.on('disconnected', () => {
+        // Solo afecta al servidor de salas; la conexión con el anfitrión sigue
+        if (done) setTimeout(() => !peer.destroyed && peer.reconnect(), 1000)
+      })
+    })
+  }
+
+  private static async joinRelay(code: string, name: string): Promise<Session> {
+    const brokers = await connectAny()
+    if (!brokers.length) throw joinError('No hay conexión con los servidores de salas. Revisa tu internet.')
+    const s = new Session('client')
+    s.code = code
+    s.meId = 'r-' + Math.random().toString(36).slice(2, 10)
+    s.brokers = brokers
+
+    return new Promise((resolve, reject) => {
+      let done = false
+      const finish = (err: JoinError | null, winner?: MqttClient) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        // Solo se conserva el servidor por el que respondió el anfitrión
+        for (const b of brokers) if (b !== winner) b.end(true)
+        if (err) {
+          reject(err)
+          return
+        }
+        s.brokers = winner ? [winner] : []
+        s.status = 'lobby'
+        s.via = 'servidor'
+        s.heartbeat = setInterval(() => s.guestHeartbeat(), HEARTBEAT)
+        resolve(s)
+      }
+      const timer = setTimeout(() => finish(joinError('No respondió la sala por el servidor.')), RELAY_TIMEOUT)
+
+      for (const b of brokers) {
+        b.subscribe(topicGuest(code, s.meId), { qos: 1 }, () => {
+          publish(b, topicHost(code), s.meId, { t: 'hello', name })
+        })
+        b.on('message', (_topic, payload) => {
+          const data = parse(payload)
+          if (!data) return
+          const msg = data.m
+          if (!done) {
+            if (msg.t === 'full' || msg.t === 'busy') {
+              finish(joinError(msg.t === 'full' ? 'La sala está llena (máximo 3 jugadores).' : 'La partida ya empezó. Espera a que termine el nivel y vuelve a abrir el link.', true))
+              return
+            }
+            if (msg.t !== 'lobby') return
+            s.host = {
+              via: 'servidor',
+              send: (m) => publish(b, topicHost(code), s.meId, m),
+              close: () => publish(b, topicHost(code), s.meId, { t: 'bye' }),
+              lastSeen: Date.now(),
+            }
+            finish(null, b)
+          }
+          if (s.brokers[0] !== b && done) return
+          if (s.host) s.host.lastSeen = Date.now()
+          if (msg.t === 'bye') {
+            s.fail('El anfitrión cerró la sala.')
+            return
+          }
+          s.fromHost(msg)
+        })
+      }
+    })
+  }
+
+  private guestHeartbeat() {
+    if (!this.host) return
+    if (Date.now() - this.host.lastSeen > DEAD_AFTER) {
+      this.fail('Se perdió la conexión con el anfitrión (cerró la sala o se desconectó).')
+      return
+    }
+    this.host.send({ t: 'ping' })
+  }
+
   private fromHost(msg: NetMsg) {
     switch (msg.t) {
+      case 'ping':
+        return
       case 'lobby':
         this.players = msg.players
         this.changed()
@@ -302,7 +450,7 @@ export class Session {
   }
 
   send(msg: NetMsg) {
-    if (this.host?.open) this.host.send(msg)
+    this.host?.send(msg)
   }
 
   /* ---------------------------------------------------------------- */
@@ -334,17 +482,21 @@ export class Session {
     this.onStart = null
     this.onEnd = null
     this.gameHandler = null
-    for (const c of this.conns.values()) c.close()
+    if (this.heartbeat) clearInterval(this.heartbeat)
+    for (const l of this.links.values()) l.close()
     this.host?.close()
-    this.peer.destroy()
+    // Dar tiempo a que salga el aviso de despedida por el relevo
+    const brokers = this.brokers
+    setTimeout(() => brokers.forEach((b) => b.end(true)), 300)
+    this.peer?.destroy()
   }
 }
 
 function describe(err: unknown): string {
   const type = (err as { type?: string })?.type
-  if (type === 'peer-unavailable') return 'No se encontró la sala. Revisa el link.'
+  if (type === 'peer-unavailable') return 'No se encontró la sala por conexión directa.'
   if (type === 'network' || type === 'server-error' || type === 'socket-error') return 'No hay conexión con el servidor de salas. Revisa tu internet.'
-  if (type === 'browser-incompatible') return 'Tu navegador no soporta el modo cooperativo.'
+  if (type === 'browser-incompatible') return 'Tu navegador no soporta la conexión directa.'
   if (type === 'unavailable-id') return 'Ese código de sala ya está en uso. Intenta de nuevo.'
   return 'Error de conexión: ' + (type ?? String(err))
 }

@@ -257,6 +257,8 @@ export class Game {
     this.scene.add(this.camera)
     this.applyView()
     this.renderer.setAnimationLoop((t) => this.frame(t))
+    document.addEventListener('visibilitychange', this.onVisibility)
+    this.onVisibility()
   }
 
   private makePlayer(info: PlayerInfo, index: number, multi: boolean): Player {
@@ -694,6 +696,8 @@ export class Game {
     canvas.removeEventListener('pointerdown', this.onPointerDown)
     canvas.removeEventListener('contextmenu', this.onContextMenu)
     document.removeEventListener('pointerlockchange', this.onLockChange)
+    document.removeEventListener('visibilitychange', this.onVisibility)
+    this.stopBackgroundTicker()
     if (document.pointerLockElement === canvas) document.exitPointerLock()
     this.resize.disconnect()
     disposeObject(this.scene)
@@ -722,7 +726,8 @@ export class Game {
     this.updateEffects(dt)
     this.updateCamera(dt)
     this.updateFloats(dt)
-    this.renderer.render(this.scene, this.camera)
+    // En segundo plano no se dibuja (nadie lo ve), pero la partida sigue
+    if (!document.hidden) this.renderer.render(this.scene, this.camera)
 
     this.netTimer -= dt
     if (this.netTimer <= 0) {
@@ -1413,6 +1418,36 @@ export class Game {
   }
 
   private onContextMenu = (e: Event) => e.preventDefault()
+
+  /* ---------------------------------------------------------------- */
+  /* Segundo plano                                                     */
+  /* ---------------------------------------------------------------- */
+
+  private bgWorker: Worker | null = null
+
+  /**
+   * Si la pestaña del anfitrión se oculta, el navegador pausa la animación
+   * y la partida se congelaría para los invitados. Un Web Worker (que el
+   * navegador no pausa) sigue marcando el ritmo del juego.
+   */
+  private onVisibility = () => {
+    if (document.hidden && this.role === 'host') this.startBackgroundTicker()
+    else this.stopBackgroundTicker()
+  }
+
+  private startBackgroundTicker() {
+    if (this.bgWorker) return
+    const code = 'setInterval(() => postMessage(0), 33)'
+    const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }))
+    this.bgWorker = new Worker(url)
+    URL.revokeObjectURL(url)
+    this.bgWorker.onmessage = () => this.frame(performance.now())
+  }
+
+  private stopBackgroundTicker() {
+    this.bgWorker?.terminate()
+    this.bgWorker = null
+  }
 
   private onLockChange = () => {
     this.locked = document.pointerLockElement === this.renderer.domElement

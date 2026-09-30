@@ -99,7 +99,10 @@ export function Lobby(props: Props) {
                   </p>
                 </>
               ) : (
-                <p className="muted">Estás conectado. El anfitrión elige el nivel y empieza la partida.</p>
+                <p className="muted">
+                  Estás conectado ({session.via === 'directa' ? '⚡ conexión directa' : '🛰️ por servidor de relevo'}). El anfitrión elige el
+                  nivel y empieza la partida.
+                </p>
               )}
             </section>
 
